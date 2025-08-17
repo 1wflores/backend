@@ -8,7 +8,7 @@ require('dotenv').config();
 const routes = require('./routes');
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 const databaseService = require('./services/databaseService');
-const reservationExpiryService = require('./services/reservationExpiryService');
+const reservationExpiryService = require('./services/reservationExpiryService'); // ✅ FIXED: Import separate service
 const logger = require('./utils/logger');
 
 // Add startup logging
