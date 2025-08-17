@@ -115,11 +115,13 @@ class ReservationController {
     }
   }
 
-  // ✅ FIXED: This method now properly handles both status and denialReason
+  // ✅ FIXED: Added the missing updateReservationStatus method
   async updateReservationStatus(req, res) {
     try {
       const { id } = req.params;
       const { status, denialReason } = req.body;
+      
+      logger.info(`Updating reservation ${id} status to ${status}`, { denialReason });
       
       const reservation = await reservationService.updateReservationStatus(
         id, 
@@ -133,6 +135,8 @@ class ReservationController {
           message: 'Reservation not found'
         });
       }
+      
+      logger.info(`Reservation ${id} status updated successfully to ${status}`);
       
       res.json({
         success: true,

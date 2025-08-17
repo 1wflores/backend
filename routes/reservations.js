@@ -50,7 +50,7 @@ const createReservationValidation = [
     .withMessage('Notes must be less than 1000 characters'),
 ];
 
-// ✅ NEW: Validation for updateReservationStatus
+// ✅ FIXED: Validation for updateReservationStatus (PATCH method)
 const updateStatusValidation = [
   param('id').isString().notEmpty().withMessage('Reservation ID is required'),
   body('status').isIn(['approved', 'denied']).withMessage('Status must be approved or denied'),
@@ -87,7 +87,10 @@ router.delete('/:id', validate(reservationIdValidation), reservationController.c
 // Admin routes
 router.get('/', requireAdmin, reservationController.getAllReservations);
 
-// ✅ NEW: Route for updating reservation status (admin only)
+// ✅ FIXED: Added missing status update route (PATCH method to match the error in logs)
+router.patch('/:id/status', requireAdmin, validate(updateStatusValidation), reservationController.updateReservationStatus);
+
+// ✅ ADDITIONAL: Also support PUT method for backward compatibility
 router.put('/:id/status', requireAdmin, validate(updateStatusValidation), reservationController.updateReservationStatus);
 
 router.get('/amenity/:amenityId', requireAdmin, validate(amenityReservationsValidation), reservationController.getReservationsByAmenity);
