@@ -1,10 +1,28 @@
 const authService = require('../services/authService');
 const logger = require('../utils/logger');
+const rateLimit = require('express-rate-limit');
 
+// Rate limiting for login attempts
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 attempts
+  message: 'Too many login attempts, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    logger.warn(`Rate limit exceeded for IP: ${req.ip}`);
+    res.status(429).json({
+      success: false,
+      message: 'Too many login attempts. Please try again in 15 minutes.'
+    });
+  }
+});
+
+// Enhanced token verification with better error handling
 const authenticateToken = async (req, res, next) => {
   try {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    const token = authHeader && authHeader.split(' ')[1];
 
     if (!token) {
       return res.status(401).json({
@@ -13,10 +31,22 @@ const authenticateToken = async (req, res, next) => {
       });
     }
 
-    // Verify token
-    const decoded = authService.verifyToken(token);
-    
-    // Get user from database to ensure user still exists and is active
+    // Verify token with additional checks
+    let decoded;
+    try {
+      decoded = authService.verifyToken(token);
+    } catch (tokenError) {
+      if (tokenError.name === 'TokenExpiredError') {
+        return res.status(401).json({
+          success: false,
+          message: 'Token expired',
+          code: 'TOKEN_EXPIRED'
+        });
+      }
+      throw tokenError;
+    }
+
+    // Verify user still exists and is active
     const user = await authService.getUserById(decoded.id);
     if (!user) {
       return res.status(401).json({
@@ -28,16 +58,28 @@ const authenticateToken = async (req, res, next) => {
     if (!user.isActive) {
       return res.status(401).json({
         success: false,
-        message: 'Account is deactivated'
+        message: 'Account is deactivated',
+        code: 'ACCOUNT_DEACTIVATED'
       });
+    }
+
+    // Check for suspicious activity
+    if (req.ip && user.lastKnownIp && req.ip !== user.lastKnownIp) {
+      logger.warn(`IP change detected for user ${user.username}: ${user.lastKnownIp} -> ${req.ip}`);
     }
 
     // Add user info to request
     req.user = {
       id: user.id,
       username: user.username,
-      role: user.role
+      role: user.role,
+      apartmentNumber: user.username.replace(/apartment/i, '')
     };
+
+    // Update last activity
+    authService.updateLastActivity(user.id, req.ip).catch(err => {
+      logger.error('Failed to update last activity:', err);
+    });
 
     next();
   } catch (error) {
@@ -59,6 +101,7 @@ const requireAdmin = (req, res, next) => {
     }
 
     if (req.user.role !== 'admin') {
+      logger.warn(`Unauthorized admin access attempt by ${req.user.username}`);
       return res.status(403).json({
         success: false,
         message: 'Admin access required'
@@ -101,39 +144,9 @@ const requireResident = (req, res, next) => {
   }
 };
 
-const optionalAuth = async (req, res, next) => {
-  try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (token) {
-      try {
-        const decoded = authService.verifyToken(token);
-        const user = await authService.getUserById(decoded.id);
-        
-        if (user && user.isActive) {
-          req.user = {
-            id: user.id,
-            username: user.username,
-            role: user.role
-          };
-        }
-      } catch (error) {
-        // Invalid token, but continue without user
-        logger.warn('Invalid token in optional auth:', error.message);
-      }
-    }
-
-    next();
-  } catch (error) {
-    logger.error('Optional authentication error:', error);
-    next(); // Continue without user
-  }
-};
-
 module.exports = {
   authenticateToken,
   requireAdmin,
   requireResident,
-  optionalAuth
+  loginLimiter
 };

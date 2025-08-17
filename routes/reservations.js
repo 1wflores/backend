@@ -29,7 +29,7 @@ const createReservationValidation = [
       if (endTime <= startTime) {
         throw new Error('End time must be after start time');
       }
-      const durationHours = (endTime.getTime() - startTime.getTime()) / (1000 * 60 * 60);
+      const durationHours = (endTime - startTime) / (1000 * 60 * 60);
       if (durationHours > 8) {
         throw new Error('Reservation cannot exceed 8 hours');
       }
@@ -50,10 +50,9 @@ const createReservationValidation = [
     .withMessage('Notes must be less than 1000 characters'),
 ];
 
-// ✅ FIXED: Validation for updateReservationStatus (PATCH method)
 const updateStatusValidation = [
   param('id').isString().notEmpty().withMessage('Reservation ID is required'),
-  body('status').isIn(['approved', 'denied']).withMessage('Status must be approved or denied'),
+  body('status').isIn(['approved', 'denied', 'cancelled']).withMessage('Invalid status'),
   body('denialReason')
     .if(body('status').equals('denied'))
     .isString()
@@ -87,10 +86,8 @@ router.delete('/:id', validate(reservationIdValidation), reservationController.c
 // Admin routes
 router.get('/', requireAdmin, reservationController.getAllReservations);
 
-// ✅ FIXED: Added missing status update route (PATCH method to match the error in logs)
+// ✅ FIXED: Added both PATCH and PUT methods for status update
 router.patch('/:id/status', requireAdmin, validate(updateStatusValidation), reservationController.updateReservationStatus);
-
-// ✅ ADDITIONAL: Also support PUT method for backward compatibility
 router.put('/:id/status', requireAdmin, validate(updateStatusValidation), reservationController.updateReservationStatus);
 
 router.get('/amenity/:amenityId', requireAdmin, validate(amenityReservationsValidation), reservationController.getReservationsByAmenity);

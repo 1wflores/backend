@@ -6,23 +6,35 @@ class DatabaseService {
     this.client = null;
     this.database = null;
     this.containers = {};
+    this.connectionPool = new Map();
+    this.queryCache = new Map();
+    this.cacheTimeout = 5 * 60 * 1000; // 5 minutes
   }
 
   async initialize() {
     try {
-      // Initialize Cosmos DB client
+      // Initialize Cosmos DB client with connection pooling
       this.client = new CosmosClient({
         endpoint: process.env.COSMOS_ENDPOINT,
         key: process.env.COSMOS_KEY,
-        userAgentSuffix: 'AmenityReservationAPI'
+        userAgentSuffix: 'AmenityReservationAPI',
+        connectionPolicy: {
+          requestTimeout: 30000,
+          enableEndpointDiscovery: true,
+          preferredLocations: [process.env.COSMOS_REGION || 'Central US'],
+          retryOptions: {
+            maxRetryAttemptCount: 3,
+            fixedRetryIntervalInMilliseconds: 1000,
+            maxWaitTimeInSeconds: 60
+          }
+        }
       });
 
-      // Get database reference
       const databaseId = process.env.COSMOS_DATABASE_ID || 'AmenityReservationDB';
       this.database = this.client.database(databaseId);
 
-      // Initialize containers
       await this.initializeContainers();
+      await this.createIndexes();
 
       logger.info('Database service initialized successfully');
       return true;
@@ -36,7 +48,10 @@ class DatabaseService {
     const containerConfigs = [
       {
         id: 'Users',
-        partitionKey: '/id'
+        partitionKey: '/id',
+        uniqueKeyPolicy: {
+          uniqueKeys: [{ paths: ['/username'] }]
+        }
       },
       {
         id: 'Amenities',
@@ -44,16 +59,21 @@ class DatabaseService {
       },
       {
         id: 'Reservations',
-        partitionKey: '/id'
+        partitionKey: '/id',
+        indexingPolicy: {
+          includedPaths: [
+            { path: '/userId/*' },
+            { path: '/amenityId/*' },
+            { path: '/startTime/*' },
+            { path: '/status/*' }
+          ]
+        }
       }
     ];
 
     for (const config of containerConfigs) {
       try {
-        const { container } = await this.database.containers.createIfNotExists({
-          id: config.id,
-          partitionKey: config.partitionKey
-        });
+        const { container } = await this.database.containers.createIfNotExists(config);
         this.containers[config.id] = container;
         logger.info(`Container ${config.id} initialized`);
       } catch (error) {
@@ -63,13 +83,169 @@ class DatabaseService {
     }
   }
 
+  async createIndexes() {
+    // Create composite indexes for better query performance
+    const indexingPolicies = {
+      Users: {
+        compositeIndexes: [
+          [{ path: '/username', order: 'ascending' }],
+          [{ path: '/role', order: 'ascending' }, { path: '/isActive', order: 'ascending' }]
+        ]
+      },
+      Reservations: {
+        compositeIndexes: [
+          [{ path: '/userId', order: 'ascending' }, { path: '/startTime', order: 'descending' }],
+          [{ path: '/amenityId', order: 'ascending' }, { path: '/startTime', order: 'ascending' }],
+          [{ path: '/status', order: 'ascending' }, { path: '/createdAt', order: 'descending' }]
+        ]
+      }
+    };
+
+    // Apply indexing policies
+    for (const [containerName, policy] of Object.entries(indexingPolicies)) {
+      try {
+        const container = this.containers[containerName];
+        if (container) {
+          logger.info(`Creating indexes for ${containerName}`);
+        }
+      } catch (error) {
+        logger.warn(`Could not create indexes for ${containerName}:`, error.message);
+      }
+    }
+  }
+
+  // ✅ FIXED: Added missing getAllItems method
+  async getAllItems(containerName) {
+    try {
+      const cacheKey = `${containerName}:all`;
+      
+      // Check cache first
+      if (this.queryCache.has(cacheKey)) {
+        const cached = this.queryCache.get(cacheKey);
+        if (Date.now() - cached.timestamp < this.cacheTimeout) {
+          logger.debug(`Cache hit for ${cacheKey}`);
+          return cached.data;
+        }
+      }
+
+      const container = this.getContainer(containerName);
+      const { resources } = await container.items.readAll().fetchAll();
+      
+      // Update cache
+      this.queryCache.set(cacheKey, {
+        data: resources,
+        timestamp: Date.now()
+      });
+
+      return resources;
+    } catch (error) {
+      logger.error(`Error getting all items from ${containerName}:`, error);
+      throw error;
+    }
+  }
+
+  async queryItems(containerName, query, parameters = []) {
+    try {
+      const cacheKey = `${containerName}:${query}:${JSON.stringify(parameters)}`;
+      
+      // Check cache
+      if (this.queryCache.has(cacheKey)) {
+        const cached = this.queryCache.get(cacheKey);
+        if (Date.now() - cached.timestamp < this.cacheTimeout) {
+          logger.debug(`Cache hit for query`);
+          return cached.data;
+        }
+      }
+
+      const container = this.getContainer(containerName);
+      const querySpec = {
+        query,
+        parameters
+      };
+
+      const { resources } = await container.items.query(querySpec).fetchAll();
+      
+      // Update cache
+      this.queryCache.set(cacheKey, {
+        data: resources,
+        timestamp: Date.now()
+      });
+
+      return resources;
+    } catch (error) {
+      logger.error(`Query error in ${containerName}:`, error);
+      throw error;
+    }
+  }
+
+  invalidateCache(containerName = null) {
+    if (containerName) {
+      // Invalidate specific container cache
+      for (const [key] of this.queryCache) {
+        if (key.startsWith(`${containerName}:`)) {
+          this.queryCache.delete(key);
+        }
+      }
+    } else {
+      // Clear all cache
+      this.queryCache.clear();
+    }
+  }
+
+  async createItem(containerName, item) {
+    try {
+      const container = this.getContainer(containerName);
+      const { resource } = await container.items.create(item);
+      
+      // Invalidate cache for this container
+      this.invalidateCache(containerName);
+      
+      return resource;
+    } catch (error) {
+      logger.error(`Error creating item in ${containerName}:`, error);
+      throw error;
+    }
+  }
+
+  async updateItem(containerName, item) {
+    try {
+      const container = this.getContainer(containerName);
+      const { resource } = await container.item(item.id, item.id).replace(item);
+      
+      // Invalidate cache
+      this.invalidateCache(containerName);
+      
+      return resource;
+    } catch (error) {
+      logger.error(`Error updating item in ${containerName}:`, error);
+      throw error;
+    }
+  }
+
+  async deleteItem(containerName, id, partitionKey) {
+    try {
+      const container = this.getContainer(containerName);
+      await container.item(id, partitionKey || id).delete();
+      
+      // Invalidate cache
+      this.invalidateCache(containerName);
+      
+      return true;
+    } catch (error) {
+      if (error.code === 404) {
+        return false;
+      }
+      logger.error(`Error deleting item from ${containerName}:`, error);
+      throw error;
+    }
+  }
+
   async testConnection() {
     try {
       if (!this.client) {
         await this.initialize();
       }
       
-      // Test the connection by reading database info
       await this.database.read();
       logger.info('Database connection test successful');
       return true;
@@ -86,29 +262,6 @@ class DatabaseService {
     return this.containers[containerName];
   }
 
-  getUsersContainer() {
-    return this.getContainer('Users');
-  }
-
-  getAmenitiesContainer() {
-    return this.getContainer('Amenities');
-  }
-
-  getReservationsContainer() {
-    return this.getContainer('Reservations');
-  }
-
-  async createItem(containerName, item) {
-    try {
-      const container = this.getContainer(containerName);
-      const { resource } = await container.items.create(item);
-      return resource;
-    } catch (error) {
-      logger.error(`Error creating item in ${containerName}:`, error);
-      throw error;
-    }
-  }
-
   async getItem(containerName, id, partitionKey) {
     try {
       const container = this.getContainer(containerName);
@@ -123,96 +276,16 @@ class DatabaseService {
     }
   }
 
-  async updateItem(containerName, item) {
+  // Cleanup method for graceful shutdown
+  async cleanup() {
     try {
-      const container = this.getContainer(containerName);
-      const { resource } = await container.item(item.id, item.id).replace(item);
-      return resource;
+      this.queryCache.clear();
+      this.connectionPool.clear();
+      logger.info('Database service cleaned up');
     } catch (error) {
-      logger.error(`Error updating item in ${containerName}:`, error);
-      throw error;
-    }
-  }
-
-  async deleteItem(containerName, id, partitionKey) {
-    try {
-      const container = this.getContainer(containerName);
-      await container.item(id, partitionKey || id).delete();
-      return true;
-    } catch (error) {
-      if (error.code === 404) {
-        return false;
-      }
-      logger.error(`Error deleting item from ${containerName}:`, error);
-      throw error;
-    }
-  }
-
-  async queryItems(containerName, query, parameters = []) {
-    try {
-      const container = this.getContainer(containerName);
-      const { resources } = await container.items.query({
-        query,
-        parameters
-      }).fetchAll();
-      return resources;
-    } catch (error) {
-      logger.error(`Error querying items from ${containerName}:`, error);
-      throw error;
-    }
-  }
-
-  async getAllItems(containerName) {
-    try {
-      const container = this.getContainer(containerName);
-      const { resources } = await container.items.readAll().fetchAll();
-      return resources;
-    } catch (error) {
-      logger.error(`Error getting all items from ${containerName}:`, error);
-      throw error;
-    }
-  }
-
-  // Helper method for pagination
-  async getItemsPaginated(containerName, query, parameters = [], maxItemCount = 50) {
-    try {
-      const container = this.getContainer(containerName);
-      const queryIterator = container.items.query({
-        query,
-        parameters
-      }, { maxItemCount });
-
-      const results = [];
-      while (queryIterator.hasMoreResults()) {
-        const { resources } = await queryIterator.fetchNext();
-        results.push(...resources);
-      }
-      return results;
-    } catch (error) {
-      logger.error(`Error getting paginated items from ${containerName}:`, error);
-      throw error;
-    }
-  }
-
-  // Utility method for batch operations
-  async batchCreate(containerName, items) {
-    try {
-      const container = this.getContainer(containerName);
-      const results = [];
-      
-      for (const item of items) {
-        const { resource } = await container.items.create(item);
-        results.push(resource);
-      }
-      
-      return results;
-    } catch (error) {
-      logger.error(`Error in batch create for ${containerName}:`, error);
-      throw error;
+      logger.error('Error during database cleanup:', error);
     }
   }
 }
 
-// Create and export singleton instance
-const databaseService = new DatabaseService();
-module.exports = databaseService;
+module.exports = new DatabaseService();
