@@ -164,33 +164,13 @@ class AuthService {
       const users = await databaseService.queryItems('Users', query, parameters);
       
       logger.info('Query returned', users.length, 'users');
+      
       if (users.length > 0) {
         logger.info('Found user:', users[0].username);
         logger.info('User role:', users[0].role);
         logger.info('User active:', users[0].isActive);
-      } else {
-        logger.warn('No users found with username:', username);
-        
-        // Let's also check what users exist in the database
-        logger.info('=== CHECKING ALL USERS IN DATABASE ===');
-        try {
-          const allUsers = await databaseService.getAllItems('Users');
-          logger.info('Total users in database:', allUsers.length);
-          allUsers.forEach((user, index) => {
-            logger.info(`User ${index + 1}:`, {
-              username: user.username,
-              role: user.role,
-              isActive: user.isActive,
-              id: user.id
-            });
-          });
-        } catch (dbError) {
-          logger.error('Error getting all users:', dbError);
-        }
-        logger.info('=====================================');
+        logger.info('=== END DATABASE USER LOOKUP ===');
       }
-      
-      logger.info('=== END DATABASE USER LOOKUP ===');
       
       return users.length > 0 ? users[0] : null;
     } catch (error) {
@@ -279,6 +259,26 @@ class AuthService {
     } catch (error) {
       logger.error('Update last login error:', error);
       // Don't throw error for login timestamp update failure
+    }
+  }
+
+  // NEW METHOD - FIX FOR THE AUTHENTICATION ERROR
+  async updateLastActivity(userId, ipAddress) {
+    try {
+      const user = await this.getUserById(userId);
+      if (user) {
+        const updatedUser = {
+          ...user,
+          lastActivity: new Date().toISOString(),
+          lastKnownIp: ipAddress,
+          updatedAt: new Date().toISOString()
+        };
+        await databaseService.updateItem('Users', updatedUser);
+      }
+    } catch (error) {
+      logger.error('Update last activity error:', error);
+      // Don't throw error for activity update failure
+      // This is a non-critical operation that shouldn't break the request
     }
   }
 
