@@ -4,6 +4,19 @@ const amenityService = require('./amenityService');
 const authService = require('./authService');
 const logger = require('../utils/logger');
 
+// Timezone helper for Costa Rica (UTC-6)
+const COSTA_RICA_OFFSET = -6; // UTC-6 hours
+
+const toCostaRicaTime = (date) => {
+  const utcDate = new Date(date);
+  // Subtract 6 hours from UTC to get Costa Rica time
+  return new Date(utcDate.getTime() + (COSTA_RICA_OFFSET * 60 * 60 * 1000));
+};
+
+const getCurrentCostaRicaTime = () => {
+  return toCostaRicaTime(new Date());
+};
+
 class ReservationService {
   // Helper method to enrich reservations with user data
   async enrichReservationWithUserData(reservation) {
@@ -33,6 +46,11 @@ class ReservationService {
       const amenity = await amenityService.getAmenityById(amenityId);
       if (!amenity) {
         throw new Error('Amenity not found');
+      }
+
+      // FIX 1: Check if amenity is under maintenance
+      if (!amenity.isActive) {
+        throw new Error('This amenity is currently under maintenance and cannot be booked');
       }
 
       // Validate time slot is available
@@ -150,7 +168,6 @@ class ReservationService {
     }
   }
 
-  // FIXED: Corrected updateItem call to use 2 parameters
   async updateReservationStatus(id, status, denialReason = null) {
     try {
       const reservation = await this.getReservationById(id);
@@ -186,7 +203,6 @@ class ReservationService {
     }
   }
 
-  // FIXED: Corrected updateItem call to use 2 parameters
   async cancelReservation(id, userId, userRole) {
     try {
       const reservation = await this.getReservationById(id);
@@ -235,6 +251,11 @@ class ReservationService {
       const amenity = await amenityService.getAmenityById(amenityId);
       if (!amenity) {
         throw new Error('Amenity not found');
+      }
+
+      // FIX 1: Check if amenity is under maintenance
+      if (!amenity.isActive) {
+        throw new Error('This amenity is currently under maintenance');
       }
 
       const startOfDay = new Date(date);
@@ -375,7 +396,12 @@ class ReservationService {
     const [closeHour, closeMinute] = operatingHours.end.split(':').map(Number);
 
     const targetDate = new Date(date);
-    const currentDate = new Date();
+    
+    // FIX 2: Use Costa Rica time for current time comparison
+    const currentCostaRicaTime = getCurrentCostaRicaTime();
+    
+    // If the target date is today, we need to compare with current Costa Rica time
+    const isToday = targetDate.toDateString() === currentCostaRicaTime.toDateString();
 
     for (let hour = openHour; hour < closeHour; hour++) {
       const slotStart = new Date(targetDate);
@@ -384,9 +410,14 @@ class ReservationService {
       const slotEnd = new Date(slotStart);
       slotEnd.setHours(hour + 1, 0, 0, 0);
 
-      // Skip past slots
-      if (slotStart < currentDate) {
-        continue;
+      // FIX 2: Skip past slots using Costa Rica time
+      if (isToday) {
+        // For today, compare with current Costa Rica time
+        const slotStartCostaRica = toCostaRicaTime(slotStart);
+        if (slotStartCostaRica <= currentCostaRicaTime) {
+          logger.info(`Skipping past slot: ${slotStart.toISOString()} (Costa Rica: ${slotStartCostaRica.toISOString()})`);
+          continue;
+        }
       }
 
       // Check if slot conflicts with existing reservations
