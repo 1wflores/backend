@@ -150,6 +150,7 @@ class ReservationService {
     }
   }
 
+  // FIXED: Corrected updateItem call to use 2 parameters
   async updateReservationStatus(id, status, denialReason = null) {
     try {
       const reservation = await this.getReservationById(id);
@@ -174,7 +175,8 @@ class ReservationService {
         updatedAt: new Date().toISOString()
       };
 
-      const updated = await databaseService.updateItem('Reservations', id, updatedReservation);
+      // FIX: Use only 2 parameters - containerName and the complete item object
+      const updated = await databaseService.updateItem('Reservations', updatedReservation);
       
       logger.info(`Reservation ${id} status updated to ${status}`);
       return await this.enrichReservationWithUserData(updated);
@@ -184,6 +186,7 @@ class ReservationService {
     }
   }
 
+  // FIXED: Corrected updateItem call to use 2 parameters
   async cancelReservation(id, userId, userRole) {
     try {
       const reservation = await this.getReservationById(id);
@@ -216,7 +219,8 @@ class ReservationService {
         updatedAt: now.toISOString()
       };
 
-      const updated = await databaseService.updateItem('Reservations', id, updatedReservation);
+      // FIX: Use only 2 parameters - containerName and the complete item object
+      const updated = await databaseService.updateItem('Reservations', updatedReservation);
       
       logger.info(`Reservation ${id} cancelled by user ${userId}`);
       return await this.enrichReservationWithUserData(updated);
@@ -309,8 +313,8 @@ class ReservationService {
         { name: '@endTime', value: endTime }
       ];
 
-      const conflictingReservations = await databaseService.queryItems('Reservations', query, parameters);
-      return conflictingReservations.length === 0;
+      const conflicts = await databaseService.queryItems('Reservations', query, parameters);
+      return conflicts.length === 0;
     } catch (error) {
       logger.error('Check time slot availability error:', error);
       throw error;
@@ -319,70 +323,77 @@ class ReservationService {
 
   validateOperatingHours(amenity, startDate, endDate) {
     const dayOfWeek = startDate.getDay();
-    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-    const dayName = dayNames[dayOfWeek];
+    const operatingHours = amenity.operatingHours;
 
-    if (!amenity.operatingHours.days.includes(dayName)) {
-      throw new Error(`Amenity is not available on ${dayName}`);
+    // Check if amenity operates on this day
+    if (!operatingHours.days.includes(dayOfWeek)) {
+      throw new Error('Amenity is not available on this day');
     }
 
-    const startHour = startDate.getHours() + startDate.getMinutes() / 60;
-    const endHour = endDate.getHours() + endDate.getMinutes() / 60;
-    
-    const [operatingStartHour, operatingStartMinute] = amenity.operatingHours.start.split(':').map(Number);
-    const [operatingEndHour, operatingEndMinute] = amenity.operatingHours.end.split(':').map(Number);
-    
-    const operatingStart = operatingStartHour + operatingStartMinute / 60;
-    const operatingEnd = operatingEndHour + operatingEndMinute / 60;
+    // Check if times are within operating hours
+    const startHour = startDate.getHours();
+    const startMinute = startDate.getMinutes();
+    const endHour = endDate.getHours();
+    const endMinute = endDate.getMinutes();
 
-    if (startHour < operatingStart || endHour > operatingEnd) {
-      throw new Error(`Reservation must be within operating hours: ${amenity.operatingHours.start} - ${amenity.operatingHours.end}`);
+    const [openHour, openMinute] = operatingHours.start.split(':').map(Number);
+    const [closeHour, closeMinute] = operatingHours.end.split(':').map(Number);
+
+    const startTimeMinutes = startHour * 60 + startMinute;
+    const endTimeMinutes = endHour * 60 + endMinute;
+    const openTimeMinutes = openHour * 60 + openMinute;
+    const closeTimeMinutes = closeHour * 60 + closeMinute;
+
+    if (startTimeMinutes < openTimeMinutes || endTimeMinutes > closeTimeMinutes) {
+      throw new Error(`Amenity operates from ${operatingHours.start} to ${operatingHours.end}`);
     }
   }
 
   determineApprovalRequirement(amenity, specialRequests) {
-    if (!amenity.autoApprovalRules) return true;
-
-    const rules = amenity.autoApprovalRules;
-
-    // Check visitor count
-    if (specialRequests.visitorCount && rules.maxVisitorsWithoutApproval) {
-      if (specialRequests.visitorCount > rules.maxVisitorsWithoutApproval) {
-        return true;
-      }
-    }
-
-    // Check special equipment usage
-    if (specialRequests.grillUsage && !rules.allowGrillWithoutApproval) {
+    // Check auto-approval rules
+    const autoApprovalRules = amenity.autoApprovalRules || {};
+    
+    // Check if special requests require approval
+    if (specialRequests.visitorCount > (autoApprovalRules.maxVisitors || 10)) {
       return true;
     }
 
-    // Default to auto-approval if no special requirements
+    if (specialRequests.grillUsage && amenity.specialRequirements?.grillUsage) {
+      return true;
+    }
+
+    // Default to auto-approval if within rules
     return false;
   }
 
   generateAvailableSlots(amenity, date, existingReservations) {
     const slots = [];
-    const [startHour, startMinute] = amenity.operatingHours.start.split(':').map(Number);
-    const [endHour, endMinute] = amenity.operatingHours.end.split(':').map(Number);
-
-    const slotDuration = 60; // 1 hour slots
-    const currentDate = new Date(date);
-    const currentHour = startHour;
+    const slotDuration = 60; // 60 minutes per slot
+    const operatingHours = amenity.operatingHours;
     
-    for (let hour = startHour; hour < endHour; hour++) {
-      const slotStart = new Date(currentDate);
+    const [openHour, openMinute] = operatingHours.start.split(':').map(Number);
+    const [closeHour, closeMinute] = operatingHours.end.split(':').map(Number);
+
+    const targetDate = new Date(date);
+    const currentDate = new Date();
+
+    for (let hour = openHour; hour < closeHour; hour++) {
+      const slotStart = new Date(targetDate);
       slotStart.setHours(hour, 0, 0, 0);
       
-      const slotEnd = new Date(currentDate);
+      const slotEnd = new Date(slotStart);
       slotEnd.setHours(hour + 1, 0, 0, 0);
 
-      // Check if this slot conflicts with existing reservations
+      // Skip past slots
+      if (slotStart < currentDate) {
+        continue;
+      }
+
+      // Check if slot conflicts with existing reservations
       const hasConflict = existingReservations.some(reservation => {
-        const reservationStart = new Date(reservation.startTime);
-        const reservationEnd = new Date(reservation.endTime);
-        
-        return (slotStart < reservationEnd && slotEnd > reservationStart);
+        const resStart = new Date(reservation.startTime);
+        const resEnd = new Date(reservation.endTime);
+        return (slotStart < resEnd && slotEnd > resStart);
       });
 
       if (!hasConflict) {
@@ -395,39 +406,6 @@ class ReservationService {
     }
 
     return slots;
-  }
-
-  async getReservationStats(startDate, endDate) {
-    try {
-      let query = `
-        SELECT 
-          c.status,
-          c.amenityId,
-          c.amenityName,
-          COUNT(1) as count
-        FROM c 
-        WHERE 1=1
-      `;
-      const parameters = [];
-
-      if (startDate) {
-        query += ' AND c.startTime >= @startDate';
-        parameters.push({ name: '@startDate', value: startDate });
-      }
-
-      if (endDate) {
-        query += ' AND c.startTime <= @endDate';
-        parameters.push({ name: '@endDate', value: endDate });
-      }
-
-      query += ' GROUP BY c.status, c.amenityId, c.amenityName';
-
-      const stats = await databaseService.queryItems('Reservations', query, parameters);
-      return stats;
-    } catch (error) {
-      logger.error('Get reservation stats error:', error);
-      throw error;
-    }
   }
 }
 

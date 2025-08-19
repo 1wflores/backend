@@ -24,7 +24,7 @@ async function initializeDatabase() {
     try {
       await authService.createUser({
         username: 'apartment000',  // Admin with apartment format
-        password: process.env.ADMIN_PASSWORD || 'Admin123!',
+        password: process.env.ADMIN_PASSWORD || 'Eptc-1794',
         role: 'admin'
       });
       logger.success('✅ Default admin user created: apartment000');
