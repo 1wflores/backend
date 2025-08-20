@@ -168,40 +168,44 @@ class ReservationService {
     }
   }
 
-  async updateReservationStatus(id, status, denialReason = null) {
-    try {
-      const reservation = await this.getReservationById(id);
-      if (!reservation) {
-        return null;
-      }
+  // Update this method in services/reservationService.js
 
-      // Validate status transition
-      if (reservation.status === 'approved' || reservation.status === 'denied') {
-        throw new Error('Cannot modify already processed reservation');
-      }
-
-      if (status === 'denied' && !denialReason) {
-        throw new Error('Denial reason is required when denying a reservation');
-      }
-
-      const updatedReservation = {
-        ...reservation,
-        status,
-        denialReason: status === 'denied' ? denialReason : null,
-        processedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-
-      // FIX: Use only 2 parameters - containerName and the complete item object
-      const updated = await databaseService.updateItem('Reservations', updatedReservation);
-      
-      logger.info(`Reservation ${id} status updated to ${status}`);
-      return await this.enrichReservationWithUserData(updated);
-    } catch (error) {
-      logger.error('Update reservation status error:', error);
-      throw error;
+async updateReservationStatus(id, status, denialReason = null) {
+  try {
+    const reservation = await this.getReservationById(id);
+    if (!reservation) {
+      return null;
     }
+
+    // Validate status transition
+    if (reservation.status === 'approved' || reservation.status === 'denied') {
+      throw new Error('Cannot modify already processed reservation');
+    }
+
+    // ✅ FIXED: Removed the requirement for denialReason
+    // Only warn if denying without reason, don't throw error
+    if (status === 'denied' && !denialReason) {
+      logger.warn(`Reservation ${id} denied without reason`);
+      denialReason = 'No reason provided'; // Default reason
+    }
+
+    const updatedReservation = {
+      ...reservation,
+      status,
+      denialReason: status === 'denied' ? denialReason : null,
+      processedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    const updated = await databaseService.updateItem('Reservations', updatedReservation);
+    
+    logger.info(`Reservation ${id} status updated to ${status}`);
+    return await this.enrichReservationWithUserData(updated);
+  } catch (error) {
+    logger.error('Update reservation status error:', error);
+    throw error;
   }
+}
 
   async cancelReservation(id, userId, userRole) {
     try {

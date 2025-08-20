@@ -50,14 +50,15 @@ const createReservationValidation = [
     .withMessage('Notes must be less than 1000 characters'),
 ];
 
+// ✅ FIXED: Made denialReason optional
 const updateStatusValidation = [
   param('id').isString().notEmpty().withMessage('Reservation ID is required'),
   body('status').isIn(['approved', 'denied', 'cancelled']).withMessage('Invalid status'),
   body('denialReason')
-    .if(body('status').equals('denied'))
+    .optional() // ← CHANGED: Now optional
     .isString()
-    .isLength({ min: 1, max: 500 })
-    .withMessage('Denial reason is required when denying reservation'),
+    .isLength({ max: 500 })
+    .withMessage('Denial reason must be less than 500 characters'),
 ];
 
 const reservationIdValidation = [
@@ -86,7 +87,7 @@ router.delete('/:id', validate(reservationIdValidation), reservationController.c
 // Admin routes
 router.get('/', requireAdmin, reservationController.getAllReservations);
 
-// ✅ FIXED: Added both PATCH and PUT methods for status update
+// ✅ FIXED: Both PATCH and PUT methods for status update
 router.patch('/:id/status', requireAdmin, validate(updateStatusValidation), reservationController.updateReservationStatus);
 router.put('/:id/status', requireAdmin, validate(updateStatusValidation), reservationController.updateReservationStatus);
 
