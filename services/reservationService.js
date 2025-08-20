@@ -131,24 +131,24 @@ class ReservationService {
     }
   }
 
-  // ✅ FIXED: Use query instead of direct item access
+  // FIXED: Use query instead of direct item access
   async getReservationById(id) {
     try {
-      logger.info(`🔍 Looking for reservation with ID: ${id}`);
+      logger.info(`Looking for reservation with ID: ${id}`);
       
-      // ✅ FIX: Use query instead of direct item access since that's working
+      // FIX: Use query instead of direct item access since that's working
       const query = 'SELECT * FROM c WHERE c.id = @id';
       const parameters = [{ name: '@id', value: id }];
       
       const reservations = await databaseService.queryItems('Reservations', query, parameters);
       
       if (reservations.length === 0) {
-        logger.warn(`❌ Reservation not found in database: ${id}`);
+        logger.warn(`Reservation not found in database: ${id}`);
         return null;
       }
       
       const reservation = reservations[0];
-      logger.info(`✅ Found reservation: ${reservation.id}, status: ${reservation.status}, user: ${reservation.userId}`);
+      logger.info(`Found reservation: ${reservation.id}, status: ${reservation.status}, user: ${reservation.userId}`);
       
       return await this.enrichReservationWithUserData(reservation);
     } catch (error) {
@@ -157,34 +157,34 @@ class ReservationService {
     }
   }
 
-  // ✅ COMPLETE WITH DEBUGGING
+  // COMPLETE WITH QUERY-BASED UPDATE
   async updateReservationStatus(id, status, denialReason = null) {
     try {
-      logger.info(`🎯 Starting status update for reservation: ${id} to ${status}`);
+      logger.info(`Starting status update for reservation: ${id} to ${status}`);
       
       const reservation = await this.getReservationById(id);
       if (!reservation) {
-        logger.warn(`❌ Reservation not found during status update: ${id}`);
+        logger.warn(`Reservation not found during status update: ${id}`);
         return null;
       }
 
-      logger.info(`📋 Current reservation status: ${reservation.status}`);
+      logger.info(`Current reservation status: ${reservation.status}`);
 
       // Validate status transition
       if (reservation.status === 'approved' || reservation.status === 'denied') {
-        logger.warn(`⚠️ Attempting to modify already processed reservation ${id}: current status is ${reservation.status}`);
+        logger.warn(`Attempting to modify already processed reservation ${id}: current status is ${reservation.status}`);
         throw new Error('Cannot modify already processed reservation');
       }
 
       // Validate status value
       if (!['approved', 'denied', 'cancelled'].includes(status)) {
-        logger.error(`❌ Invalid status value: ${status}`);
+        logger.error(`Invalid status value: ${status}`);
         throw new Error('Invalid status value');
       }
 
       // Handle denial reason
       if (status === 'denied' && !denialReason) {
-        logger.warn(`⚠️ Reservation ${id} denied without reason`);
+        logger.warn(`Reservation ${id} denied without reason`);
         denialReason = 'No reason provided';
       }
 
@@ -196,42 +196,124 @@ class ReservationService {
         updatedAt: new Date().toISOString()
       };
 
-      logger.info(`💾 Updating reservation ${id} in database...`);
+      logger.info(`Updating reservation ${id} in database using query-based update...`);
       
-      const updated = await databaseService.updateItem('Reservations', updatedReservation);
+      // FIX: Use query-based update instead of direct item update
+      const updated = await this.updateReservationByQuery(id, updatedReservation);
       
-      logger.info(`✅ Successfully updated reservation ${id} status to ${status}`);
+      if (!updated) {
+        logger.error(`Failed to update reservation ${id}`);
+        throw new Error('Failed to update reservation in database');
+      }
+      
+      logger.info(`Successfully updated reservation ${id} status to ${status}`);
       
       return await this.enrichReservationWithUserData(updated);
     } catch (error) {
-      logger.error('❌ Update reservation status error:', error);
+      logger.error('Update reservation status error:', error);
       throw error;
     }
   }
 
-  // ✅ DEBUG METHOD
-  async debugReservationExists(id) {
+  // NEW: Query-based update method
+  async updateReservationByQuery(id, updatedData) {
     try {
-      logger.info(`🔍 Debug: Checking if reservation ${id} exists in any form...`);
+      logger.info(`Performing query-based update for reservation ${id}`);
       
-      // Try to query for the reservation using SQL
+      // First, get the current item to ensure we have the latest version
       const query = 'SELECT * FROM c WHERE c.id = @id';
       const parameters = [{ name: '@id', value: id }];
       
-      const reservations = await databaseService.queryItems('Reservations', query, parameters);
+      const results = await databaseService.queryItems('Reservations', query, parameters);
       
-      if (reservations.length === 0) {
-        logger.warn(`❌ Debug: No reservation found with ID ${id} in query results`);
+      if (results.length === 0) {
+        logger.warn(`Reservation ${id} not found for update`);
         return null;
       }
       
-      const reservation = reservations[0];
-      logger.info(`✅ Debug: Found reservation via query: ${reservation.id}, status: ${reservation.status}`);
+      const currentItem = results[0];
+      logger.info(`Found current item for update: ${currentItem.id}`);
       
-      return reservation;
+      // Create the updated item with all required Cosmos DB properties
+      const itemToUpdate = {
+        ...updatedData,
+        id: id, // Ensure ID is preserved
+        _rid: currentItem._rid, // Preserve Cosmos DB internal properties
+        _self: currentItem._self,
+        _etag: currentItem._etag,
+        _attachments: currentItem._attachments,
+        _ts: currentItem._ts
+      };
+      
+      // Use the working databaseService.createItem to "upsert" (will replace if exists)
+      const result = await databaseService.createItem('Reservations', itemToUpdate);
+      
+      logger.info(`Query-based update completed for reservation ${id}`);
+      return result;
+      
     } catch (error) {
-      logger.error('❌ Debug query error:', error);
+      // If createItem fails because item exists, try direct replace one more time
+      if (error.code === 409) { // Conflict - item exists
+        logger.info(`Item exists, attempting direct replace for ${id}`);
+        try {
+          return await databaseService.updateItem('Reservations', updatedData);
+        } catch (replaceError) {
+          logger.error(`Both create and replace failed for ${id}:`, replaceError);
+          throw replaceError;
+        }
+      }
+      
+      logger.error(`Query-based update failed for ${id}:`, error);
       throw error;
+    }
+  }
+
+  // DEBUG METHOD - Add temporarily to understand database access issues
+  async debugReservationExists(id) {
+    try {
+      logger.info(`DIAGNOSIS: Testing different access methods for reservation ${id}`);
+      
+      // Method 1: Direct item access (the failing one)
+      try {
+        logger.info(`Testing direct item access...`);
+        const directResult = await databaseService.getItem('Reservations', id);
+        logger.info(`Direct access result:`, directResult ? 'FOUND' : 'NOT FOUND');
+      } catch (error) {
+        logger.error(`Direct access error:`, error.message);
+      }
+      
+      // Method 2: Direct item access with explicit partition key
+      try {
+        logger.info(`Testing direct item access with explicit partition key...`);
+        const directWithPKResult = await databaseService.getItem('Reservations', id, id);
+        logger.info(`Direct with PK result:`, directWithPKResult ? 'FOUND' : 'NOT FOUND');
+      } catch (error) {
+        logger.error(`Direct with PK access error:`, error.message);
+      }
+      
+      // Method 3: Query access (the working one)
+      try {
+        logger.info(`Testing query access...`);
+        const query = 'SELECT * FROM c WHERE c.id = @id';
+        const parameters = [{ name: '@id', value: id }];
+        const queryResult = await databaseService.queryItems('Reservations', query, parameters);
+        logger.info(`Query access result:`, queryResult.length > 0 ? `FOUND (${queryResult.length} items)` : 'NOT FOUND');
+        
+        if (queryResult.length > 0) {
+          const item = queryResult[0];
+          logger.info(`Item details:`, {
+            id: item.id,
+            partitionKeyValue: item.id, // Show what the partition key value should be
+            status: item.status,
+            createdAt: item.createdAt
+          });
+        }
+      } catch (error) {
+        logger.error(`Query access error:`, error.message);
+      }
+      
+    } catch (error) {
+      logger.error('Diagnosis error:', error);
     }
   }
 
@@ -267,7 +349,7 @@ class ReservationService {
         updatedAt: now.toISOString()
       };
 
-      const updated = await databaseService.updateItem('Reservations', updatedReservation);
+      const updated = await this.updateReservationByQuery(id, updatedReservation);
       
       logger.info(`Reservation ${id} cancelled by user ${userId}`);
       return await this.enrichReservationWithUserData(updated);
