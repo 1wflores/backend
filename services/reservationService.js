@@ -4,77 +4,52 @@ const amenityService = require('./amenityService');
 const authService = require('./authService');
 const logger = require('../utils/logger');
 
-// Timezone helper for Costa Rica (UTC-6)
-const COSTA_RICA_OFFSET = -6; // UTC-6 hours
-
-const toCostaRicaTime = (date) => {
-  const utcDate = new Date(date);
-  // Subtract 6 hours from UTC to get Costa Rica time
-  return new Date(utcDate.getTime() + (COSTA_RICA_OFFSET * 60 * 60 * 1000));
-};
-
-const getCurrentCostaRicaTime = () => {
-  return toCostaRicaTime(new Date());
-};
-
 class ReservationService {
-  // Helper method to enrich reservations with user data
-  async enrichReservationWithUserData(reservation) {
-    try {
-      const user = await authService.getUserById(reservation.userId);
-      return {
-        ...reservation,
-        username: user?.username || null,
-        userRole: user?.role || null
-      };
-    } catch (error) {
-      logger.warn(`Failed to get user data for reservation ${reservation.id}:`, error.message);
-      return reservation;
-    }
-  }
-
-  // Helper method to enrich multiple reservations
-  async enrichReservationsWithUserData(reservations) {
-    return Promise.all(reservations.map(reservation => this.enrichReservationWithUserData(reservation)));
-  }
-
   async createReservation(reservationData) {
     try {
-      const { userId, amenityId, startTime, endTime, specialRequests = {} } = reservationData;
-
-      // Validate amenity exists
+      const { amenityId, startTime, endTime, specialRequests = {} } = reservationData;
+      
+      // Validate amenity exists and is active
       const amenity = await amenityService.getAmenityById(amenityId);
       if (!amenity) {
         throw new Error('Amenity not found');
       }
 
-      // FIX 1: Check if amenity is under maintenance
       if (!amenity.isActive) {
-        throw new Error('This amenity is currently under maintenance and cannot be booked');
+        throw new Error('This amenity is currently unavailable');
       }
 
-      // Validate time slot is available
-      const isAvailable = await this.isTimeSlotAvailable(amenityId, startTime, endTime);
-      if (!isAvailable) {
-        throw new Error('Time slot is not available');
+      // Validate time slots
+      const startDateTime = new Date(startTime);
+      const endDateTime = new Date(endTime);
+      const now = new Date();
+
+      if (startDateTime <= now) {
+        throw new Error('Start time must be in the future');
       }
 
-      // Validate operating hours
-      const startDate = new Date(startTime);
-      const endDate = new Date(endTime);
-      this.validateOperatingHours(amenity, startDate, endDate);
+      if (endDateTime <= startDateTime) {
+        throw new Error('End time must be after start time');
+      }
 
-      // Determine approval status
-      const requiresApproval = this.determineApprovalRequirement(amenity, specialRequests);
+      // Check for conflicts
+      const conflictingReservations = await this.getConflictingReservations(amenityId, startTime, endTime);
+      if (conflictingReservations.length > 0) {
+        throw new Error('Time slot is already reserved');
+      }
 
-      // Create reservation
+      // Determine if auto-approval applies
+      const durationMinutes = (endDateTime - startDateTime) / (1000 * 60);
+      const requiresApproval = this.checkIfRequiresApproval(amenity, durationMinutes, specialRequests);
+
       const reservation = {
         id: uuidv4(),
-        userId,
+        userId: reservationData.userId,
         amenityId,
         amenityName: amenity.name,
-        startTime: startDate.toISOString(),
-        endTime: endDate.toISOString(),
+        startTime,
+        endTime,
+        durationMinutes: Math.round(durationMinutes),
         status: requiresApproval ? 'pending' : 'approved',
         specialRequests,
         createdAt: new Date().toISOString(),
@@ -156,10 +131,19 @@ class ReservationService {
     }
   }
 
+  // ✅ ENHANCED WITH DEBUGGING
   async getReservationById(id) {
     try {
+      logger.info(`🔍 Looking for reservation with ID: ${id}`);
+      
       const reservation = await databaseService.getItem('Reservations', id);
-      if (!reservation) return null;
+      
+      if (!reservation) {
+        logger.warn(`❌ Reservation not found in database: ${id}`);
+        return null;
+      }
+      
+      logger.info(`✅ Found reservation: ${reservation.id}, status: ${reservation.status}, user: ${reservation.userId}`);
       
       return await this.enrichReservationWithUserData(reservation);
     } catch (error) {
@@ -168,49 +152,83 @@ class ReservationService {
     }
   }
 
-// Replace the incomplete updateReservationStatus method in your backend services/reservationService.js with this:
+  // ✅ COMPLETE WITH DEBUGGING
+  async updateReservationStatus(id, status, denialReason = null) {
+    try {
+      logger.info(`🎯 Starting status update for reservation: ${id} to ${status}`);
+      
+      const reservation = await this.getReservationById(id);
+      if (!reservation) {
+        logger.warn(`❌ Reservation not found during status update: ${id}`);
+        return null;
+      }
 
-async updateReservationStatus(id, status, denialReason = null) {
-  try {
-    const reservation = await this.getReservationById(id);
-    if (!reservation) {
-      logger.warn(`Reservation not found: ${id}`);
-      return null;
+      logger.info(`📋 Current reservation status: ${reservation.status}`);
+
+      // Validate status transition
+      if (reservation.status === 'approved' || reservation.status === 'denied') {
+        logger.warn(`⚠️ Attempting to modify already processed reservation ${id}: current status is ${reservation.status}`);
+        throw new Error('Cannot modify already processed reservation');
+      }
+
+      // Validate status value
+      if (!['approved', 'denied', 'cancelled'].includes(status)) {
+        logger.error(`❌ Invalid status value: ${status}`);
+        throw new Error('Invalid status value');
+      }
+
+      // Handle denial reason
+      if (status === 'denied' && !denialReason) {
+        logger.warn(`⚠️ Reservation ${id} denied without reason`);
+        denialReason = 'No reason provided';
+      }
+
+      const updatedReservation = {
+        ...reservation,
+        status,
+        denialReason: status === 'denied' ? denialReason : null,
+        processedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      logger.info(`💾 Updating reservation ${id} in database...`);
+      
+      const updated = await databaseService.updateItem('Reservations', updatedReservation);
+      
+      logger.info(`✅ Successfully updated reservation ${id} status to ${status}`);
+      
+      return await this.enrichReservationWithUserData(updated);
+    } catch (error) {
+      logger.error('❌ Update reservation status error:', error);
+      throw error;
     }
-
-    // Validate status transition
-    if (reservation.status === 'approved' || reservation.status === 'denied') {
-      throw new Error('Cannot modify already processed reservation');
-    }
-
-    // Validate status value
-    if (!['approved', 'denied', 'cancelled'].includes(status)) {
-      throw new Error('Invalid status value');
-    }
-
-    // Handle denial reason
-    if (status === 'denied' && !denialReason) {
-      logger.warn(`Reservation ${id} denied without reason`);
-      denialReason = 'No reason provided'; // Default reason
-    }
-
-    const updatedReservation = {
-      ...reservation,
-      status,
-      denialReason: status === 'denied' ? denialReason : null,
-      processedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-
-    const updated = await databaseService.updateItem('Reservations', updatedReservation);
-    
-    logger.info(`Reservation ${id} status updated to ${status}`);
-    return await this.enrichReservationWithUserData(updated);
-  } catch (error) {
-    logger.error('Update reservation status error:', error);
-    throw error;
   }
-}
+
+  // ✅ DEBUG METHOD
+  async debugReservationExists(id) {
+    try {
+      logger.info(`🔍 Debug: Checking if reservation ${id} exists in any form...`);
+      
+      // Try to query for the reservation using SQL
+      const query = 'SELECT * FROM c WHERE c.id = @id';
+      const parameters = [{ name: '@id', value: id }];
+      
+      const reservations = await databaseService.queryItems('Reservations', query, parameters);
+      
+      if (reservations.length === 0) {
+        logger.warn(`❌ Debug: No reservation found with ID ${id} in query results`);
+        return null;
+      }
+      
+      const reservation = reservations[0];
+      logger.info(`✅ Debug: Found reservation via query: ${reservation.id}, status: ${reservation.status}`);
+      
+      return reservation;
+    } catch (error) {
+      logger.error('❌ Debug query error:', error);
+      throw error;
+    }
+  }
 
   async cancelReservation(id, userId, userRole) {
     try {
@@ -244,7 +262,6 @@ async updateReservationStatus(id, status, denialReason = null) {
         updatedAt: now.toISOString()
       };
 
-      // FIX: Use only 2 parameters - containerName and the complete item object
       const updated = await databaseService.updateItem('Reservations', updatedReservation);
       
       logger.info(`Reservation ${id} cancelled by user ${userId}`);
@@ -262,18 +279,17 @@ async updateReservationStatus(id, status, denialReason = null) {
         throw new Error('Amenity not found');
       }
 
-      // FIX 1: Check if amenity is under maintenance
       if (!amenity.isActive) {
-        throw new Error('This amenity is currently under maintenance');
+        throw new Error('This amenity is currently unavailable');
       }
 
+      // Get existing reservations for the date
       const startOfDay = new Date(date);
       startOfDay.setHours(0, 0, 0, 0);
       
       const endOfDay = new Date(date);
       endOfDay.setHours(23, 59, 59, 999);
 
-      // Get existing reservations for the day
       const query = `
         SELECT * FROM c 
         WHERE c.amenityId = @amenityId 
@@ -289,13 +305,39 @@ async updateReservationStatus(id, status, denialReason = null) {
       ];
 
       const existingReservations = await databaseService.queryItems('Reservations', query, parameters);
-
-      // Generate available slots based on operating hours
+      
+      // Generate available slots based on amenity operating hours
       const availableSlots = this.generateAvailableSlots(amenity, date, existingReservations);
       
       return availableSlots;
     } catch (error) {
       logger.error('Get available slots error:', error);
+      throw error;
+    }
+  }
+
+  async getConflictingReservations(amenityId, startTime, endTime) {
+    try {
+      const query = `
+        SELECT * FROM c 
+        WHERE c.amenityId = @amenityId 
+        AND c.status IN ('approved', 'pending')
+        AND (
+          (c.startTime <= @startTime AND c.endTime > @startTime) OR
+          (c.startTime < @endTime AND c.endTime >= @endTime) OR
+          (c.startTime >= @startTime AND c.endTime <= @endTime)
+        )
+      `;
+      
+      const parameters = [
+        { name: '@amenityId', value: amenityId },
+        { name: '@startTime', value: startTime },
+        { name: '@endTime', value: endTime }
+      ];
+
+      return await databaseService.queryItems('Reservations', query, parameters);
+    } catch (error) {
+      logger.error('Get conflicting reservations error:', error);
       throw error;
     }
   }
@@ -326,116 +368,60 @@ async updateReservationStatus(id, status, denialReason = null) {
   }
 
   // Helper methods
-  async isTimeSlotAvailable(amenityId, startTime, endTime) {
-    try {
-      const query = `
-        SELECT * FROM c 
-        WHERE c.amenityId = @amenityId 
-        AND c.status IN ('approved', 'pending')
-        AND (
-          (c.startTime < @endTime AND c.endTime > @startTime)
-        )
-      `;
-      
-      const parameters = [
-        { name: '@amenityId', value: amenityId },
-        { name: '@startTime', value: startTime },
-        { name: '@endTime', value: endTime }
-      ];
-
-      const conflicts = await databaseService.queryItems('Reservations', query, parameters);
-      return conflicts.length === 0;
-    } catch (error) {
-      logger.error('Check time slot availability error:', error);
-      throw error;
-    }
-  }
-
-  validateOperatingHours(amenity, startDate, endDate) {
-    const dayOfWeek = startDate.getDay();
-    const operatingHours = amenity.operatingHours;
-
-    // Check if amenity operates on this day
-    if (!operatingHours.days.includes(dayOfWeek)) {
-      throw new Error('Amenity is not available on this day');
-    }
-
-    // Check if times are within operating hours
-    const startHour = startDate.getHours();
-    const startMinute = startDate.getMinutes();
-    const endHour = endDate.getHours();
-    const endMinute = endDate.getMinutes();
-
-    const [openHour, openMinute] = operatingHours.start.split(':').map(Number);
-    const [closeHour, closeMinute] = operatingHours.end.split(':').map(Number);
-
-    const startTimeMinutes = startHour * 60 + startMinute;
-    const endTimeMinutes = endHour * 60 + endMinute;
-    const openTimeMinutes = openHour * 60 + openMinute;
-    const closeTimeMinutes = closeHour * 60 + closeMinute;
-
-    if (startTimeMinutes < openTimeMinutes || endTimeMinutes > closeTimeMinutes) {
-      throw new Error(`Amenity operates from ${operatingHours.start} to ${operatingHours.end}`);
-    }
-  }
-
-  determineApprovalRequirement(amenity, specialRequests) {
-    // Check auto-approval rules
-    const autoApprovalRules = amenity.autoApprovalRules || {};
+  checkIfRequiresApproval(amenity, durationMinutes, specialRequests) {
+    const rules = amenity.autoApprovalRules;
     
-    // Check if special requests require approval
-    if (specialRequests.visitorCount > (autoApprovalRules.maxVisitors || 10)) {
+    if (!rules) return true;
+    
+    // Check duration
+    if (durationMinutes > rules.maxDurationMinutes) {
       return true;
     }
-
-    if (specialRequests.grillUsage && amenity.specialRequirements?.grillUsage) {
+    
+    // Check special requirements
+    if (specialRequests.visitorCount && specialRequests.visitorCount > (rules.maxVisitors || 4)) {
       return true;
     }
-
-    // Default to auto-approval if within rules
+    
+    if (specialRequests.grillUsage && !rules.allowGrillUsage) {
+      return true;
+    }
+    
     return false;
   }
 
   generateAvailableSlots(amenity, date, existingReservations) {
     const slots = [];
-    const slotDuration = 60; // 60 minutes per slot
     const operatingHours = amenity.operatingHours;
     
-    const [openHour, openMinute] = operatingHours.start.split(':').map(Number);
-    const [closeHour, closeMinute] = operatingHours.end.split(':').map(Number);
-
-    const targetDate = new Date(date);
+    if (!operatingHours) return slots;
     
-    // FIX 2: Use Costa Rica time for current time comparison
-    const currentCostaRicaTime = getCurrentCostaRicaTime();
+    const requestDate = new Date(date);
+    const dayOfWeek = requestDate.getDay();
     
-    // If the target date is today, we need to compare with current Costa Rica time
-    const isToday = targetDate.toDateString() === currentCostaRicaTime.toDateString();
-
-    for (let hour = openHour; hour < closeHour; hour++) {
-      const slotStart = new Date(targetDate);
+    // Check if amenity operates on this day
+    if (!operatingHours.days.includes(dayOfWeek)) {
+      return slots;
+    }
+    
+    // Generate slots (simplified - you can enhance this logic)
+    const startHour = parseInt(operatingHours.startTime.split(':')[0]);
+    const endHour = parseInt(operatingHours.endTime.split(':')[0]);
+    
+    for (let hour = startHour; hour < endHour; hour++) {
+      const slotStart = new Date(requestDate);
       slotStart.setHours(hour, 0, 0, 0);
       
       const slotEnd = new Date(slotStart);
       slotEnd.setHours(hour + 1, 0, 0, 0);
-
-      // FIX 2: Skip past slots using Costa Rica time
-      if (isToday) {
-        // For today, compare with current Costa Rica time
-        const slotStartCostaRica = toCostaRicaTime(slotStart);
-        if (slotStartCostaRica <= currentCostaRicaTime) {
-          logger.info(`Skipping past slot: ${slotStart.toISOString()} (Costa Rica: ${slotStartCostaRica.toISOString()})`);
-          continue;
-        }
-      }
-
+      
       // Check if slot conflicts with existing reservations
       const hasConflict = existingReservations.some(reservation => {
         const resStart = new Date(reservation.startTime);
         const resEnd = new Date(reservation.endTime);
         return (slotStart < resEnd && slotEnd > resStart);
       });
-
+      
       if (!hasConflict) {
         slots.push({
           startTime: slotStart.toISOString(),
@@ -444,8 +430,35 @@ async updateReservationStatus(id, status, denialReason = null) {
         });
       }
     }
-
+    
     return slots;
+  }
+
+  async enrichReservationWithUserData(reservation) {
+    try {
+      if (!reservation) return null;
+      
+      const user = await authService.getUserById(reservation.userId);
+      return {
+        ...reservation,
+        userName: user ? user.username : 'Unknown User'
+      };
+    } catch (error) {
+      logger.warn('Could not enrich reservation with user data:', error.message);
+      return reservation;
+    }
+  }
+
+  async enrichReservationsWithUserData(reservations) {
+    try {
+      const enrichedReservations = await Promise.all(
+        reservations.map(reservation => this.enrichReservationWithUserData(reservation))
+      );
+      return enrichedReservations.filter(reservation => reservation !== null);
+    } catch (error) {
+      logger.error('Error enriching reservations with user data:', error);
+      return reservations;
+    }
   }
 }
 

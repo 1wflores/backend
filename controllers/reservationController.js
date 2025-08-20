@@ -115,14 +115,28 @@ class ReservationController {
     }
   }
 
-  // ✅ FIXED: Added the missing updateReservationStatus method
+  // Add this to your backend controllers/reservationController.js
+
   async updateReservationStatus(req, res) {
     try {
       const { id } = req.params;
       const { status, denialReason } = req.body;
       
-      logger.info(`Updating reservation ${id} status to ${status}`, { denialReason });
+      logger.info(`🎯 Controller: Updating reservation ${id} status to ${status}`, { denialReason });
       
+      // First, let's debug if the reservation exists at all
+      const debugReservation = await reservationService.debugReservationExists(id);
+      if (!debugReservation) {
+        logger.error(`❌ Controller: Reservation ${id} does not exist in database`);
+        return res.status(404).json({
+          success: false,
+          message: 'Reservation not found'
+        });
+      }
+      
+      logger.info(`📋 Controller: Found reservation ${id} with status: ${debugReservation.status}`);
+      
+      // Now try the normal update
       const reservation = await reservationService.updateReservationStatus(
         id, 
         status, 
@@ -130,13 +144,14 @@ class ReservationController {
       );
       
       if (!reservation) {
+        logger.error(`❌ Controller: Update returned null for reservation ${id}`);
         return res.status(404).json({
           success: false,
-          message: 'Reservation not found'
+          message: 'Reservation not found or could not be updated'
         });
       }
       
-      logger.info(`Reservation ${id} status updated successfully to ${status}`);
+      logger.info(`✅ Controller: Reservation ${id} status updated successfully to ${status}`);
       
       res.json({
         success: true,
@@ -146,7 +161,7 @@ class ReservationController {
         }
       });
     } catch (error) {
-      logger.error('Update reservation status error:', error);
+      logger.error('❌ Controller: Update reservation status error:', error);
       res.status(400).json({
         success: false,
         message: error.message
