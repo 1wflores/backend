@@ -131,18 +131,23 @@ class ReservationService {
     }
   }
 
-  // ✅ ENHANCED WITH DEBUGGING
+  // ✅ FIXED: Use query instead of direct item access
   async getReservationById(id) {
     try {
       logger.info(`🔍 Looking for reservation with ID: ${id}`);
       
-      const reservation = await databaseService.getItem('Reservations', id);
+      // ✅ FIX: Use query instead of direct item access since that's working
+      const query = 'SELECT * FROM c WHERE c.id = @id';
+      const parameters = [{ name: '@id', value: id }];
       
-      if (!reservation) {
+      const reservations = await databaseService.queryItems('Reservations', query, parameters);
+      
+      if (reservations.length === 0) {
         logger.warn(`❌ Reservation not found in database: ${id}`);
         return null;
       }
       
+      const reservation = reservations[0];
       logger.info(`✅ Found reservation: ${reservation.id}, status: ${reservation.status}, user: ${reservation.userId}`);
       
       return await this.enrichReservationWithUserData(reservation);
