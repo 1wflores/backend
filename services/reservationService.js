@@ -168,12 +168,13 @@ class ReservationService {
     }
   }
 
-  // Update this method in services/reservationService.js
+// Replace the incomplete updateReservationStatus method in your backend services/reservationService.js with this:
 
 async updateReservationStatus(id, status, denialReason = null) {
   try {
     const reservation = await this.getReservationById(id);
     if (!reservation) {
+      logger.warn(`Reservation not found: ${id}`);
       return null;
     }
 
@@ -182,8 +183,12 @@ async updateReservationStatus(id, status, denialReason = null) {
       throw new Error('Cannot modify already processed reservation');
     }
 
-    // ✅ FIXED: Removed the requirement for denialReason
-    // Only warn if denying without reason, don't throw error
+    // Validate status value
+    if (!['approved', 'denied', 'cancelled'].includes(status)) {
+      throw new Error('Invalid status value');
+    }
+
+    // Handle denial reason
     if (status === 'denied' && !denialReason) {
       logger.warn(`Reservation ${id} denied without reason`);
       denialReason = 'No reason provided'; // Default reason
