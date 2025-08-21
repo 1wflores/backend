@@ -15,8 +15,10 @@ const app = express();
 
 // Import after app initialization
 const routes = require('./routes');
+const userRoutes = require('./routes/userRoutes'); // ✅ NEW: User management routes
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 const databaseService = require('./services/databaseService');
+const authService = require('./services/authService'); // ✅ NEW: For default admin creation
 const logger = require('./utils/logger');
 
 // CRITICAL: Azure App Service port
@@ -98,9 +100,24 @@ app.get('/api/health', async (req, res) => {
 // API routes
 app.use('/api', routes);
 
+// ✅ NEW: User management routes
+app.use('/api/auth', userRoutes);
+
 // Error handlers
 app.use(notFoundHandler);
 app.use(errorHandler);
+
+// ✅ NEW: Initialize default users function
+const initializeDefaultUsers = async () => {
+  try {
+    console.log('👤 Initializing default users...');
+    await authService.createDefaultAdmin();
+    console.log('✅ Default users initialization completed');
+  } catch (error) {
+    console.error('⚠️ Default users initialization failed:', error.message);
+    // Don't crash the server if this fails
+  }
+};
 
 // Start server with better error handling
 async function startServer() {
@@ -112,6 +129,10 @@ async function startServer() {
       console.log('📊 Connecting to database...');
       await databaseService.initialize();
       console.log('✅ Database connected successfully');
+      
+      // ✅ NEW: Initialize default users after database connection
+      await initializeDefaultUsers();
+      
     } catch (dbError) {
       console.error('⚠️ Database connection failed:', dbError.message);
       console.log('⚠️ Server will run without database connection');
@@ -125,6 +146,7 @@ async function startServer() {
       console.log(`✅ Listening on port ${PORT}`);
       console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log('📡 Server is ready');
+      console.log('👤 User Management: Enabled');
       console.log('=================================');
     });
 

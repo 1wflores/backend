@@ -311,6 +311,239 @@ class AuthService {
     const { passwordHash, ...sanitizedUser } = user;
     return sanitizedUser;
   }
+
+    // Add these methods to your existing services/authService.js
+
+    // Get all users with filtering and pagination (Admin only)
+    async getAllUsers({ page = 1, limit = 50, search, role, isActive } = {}) {
+      try {
+        let query = 'SELECT * FROM c WHERE c.type = @type';
+        const parameters = [
+          { name: '@type', value: 'user' }
+        ];
+
+        // Add search filter
+        if (search) {
+          query += ' AND CONTAINS(LOWER(c.username), @search)';
+          parameters.push({ name: '@search', value: search.toLowerCase() });
+        }
+
+        // Add role filter
+        if (role) {
+          query += ' AND c.role = @role';
+          parameters.push({ name: '@role', value: role });
+        }
+
+        // Add active status filter
+        if (isActive !== undefined) {
+          query += ' AND c.isActive = @isActive';
+          parameters.push({ name: '@isActive', value: isActive });
+        }
+
+        query += ' ORDER BY c.createdAt DESC';
+
+        const results = await databaseService.queryItems('Users', query, parameters);
+        
+        // Calculate pagination
+        const total = results.length;
+        const startIndex = (page - 1) * limit;
+        const endIndex = startIndex + limit;
+        const paginatedResults = results.slice(startIndex, endIndex);
+
+        return {
+          items: paginatedResults.map(user => this.sanitizeUser(user)),
+          total,
+          page,
+          limit
+        };
+      } catch (error) {
+        logger.error('Get all users error:', error);
+        throw error;
+      }
+    }
+
+    // Update user (Admin only)
+    async updateUser(userId, updates) {
+      try {
+        const user = await this.getUserById(userId);
+        if (!user) {
+          throw new Error('User not found');
+        }
+
+        // Validate updates
+        const allowedUpdates = ['username', 'role', 'isActive'];
+        const filteredUpdates = {};
+        
+        for (const key of allowedUpdates) {
+          if (updates.hasOwnProperty(key)) {
+            filteredUpdates[key] = updates[key];
+          }
+        }
+
+        // If updating username, check for conflicts
+        if (filteredUpdates.username && filteredUpdates.username !== user.username) {
+          const existingUser = await this.getUserByUsername(filteredUpdates.username);
+          if (existingUser) {
+            throw new Error('Username already exists');
+          }
+        }
+
+        // If updating to resident role, validate username format
+        if (filteredUpdates.role === 'resident' && filteredUpdates.username) {
+          if (!filteredUpdates.username.match(/^apartment\d+$/i)) {
+            throw new Error('Resident username must be in format: apartment + number (e.g., apartment204)');
+          }
+        }
+
+        const updatedUser = {
+          ...user,
+          ...filteredUpdates,
+          updatedAt: new Date().toISOString()
+        };
+
+        // Use the same update method from reservationService
+        const result = await this.updateUserByQuery(userId, updatedUser);
+        
+        logger.info(`User updated: ${userId}`);
+        return this.sanitizeUser(result);
+      } catch (error) {
+        logger.error('Update user error:', error);
+        throw error;
+      }
+    }
+
+    // Query-based update method (similar to reservationService fix)
+    async updateUserByQuery(id, updatedData) {
+      try {
+        logger.info(`Performing query-based update for user ${id}`);
+        
+        // First, get the current item to ensure we have the latest version
+        const query = 'SELECT * FROM c WHERE c.id = @id';
+        const parameters = [{ name: '@id', value: id }];
+        
+        const results = await databaseService.queryItems('Users', query, parameters);
+        
+        if (results.length === 0) {
+          logger.warn(`User ${id} not found for update`);
+          return null;
+        }
+        
+        const currentItem = results[0];
+        logger.info(`Found current user for update: ${currentItem.id}`);
+        
+        // Create the updated item with all required Cosmos DB properties
+        const itemToUpdate = {
+          ...updatedData,
+          id: id, // Ensure ID is preserved
+          type: 'user', // Ensure type is preserved
+          _rid: currentItem._rid, // Preserve Cosmos DB internal properties
+          _self: currentItem._self,
+          _etag: currentItem._etag,
+          _attachments: currentItem._attachments,
+          _ts: currentItem._ts
+        };
+        
+        // Use the working databaseService.createItem to "upsert" (will replace if exists)
+        const result = await databaseService.createItem('Users', itemToUpdate);
+        
+        logger.info(`Query-based update completed for user ${id}`);
+        return result;
+      } catch (error) {
+        logger.error(`Update user by query error for ${id}:`, error);
+        throw error;
+      }
+    }
+
+    // Deactivate user (Admin only)
+    async deactivateUser(userId) {
+      try {
+        const updatedUser = await this.updateUser(userId, { isActive: false });
+        logger.info(`User deactivated: ${userId}`);
+        return updatedUser;
+      } catch (error) {
+        logger.error('Deactivate user error:', error);
+        throw error;
+      }
+    }
+
+    // Activate user (Admin only)
+    async activateUser(userId) {
+      try {
+        const updatedUser = await this.updateUser(userId, { isActive: true });
+        logger.info(`User activated: ${userId}`);
+        return updatedUser;
+      } catch (error) {
+        logger.error('Activate user error:', error);
+        throw error;
+      }
+    }
+
+    // Get user's reservations (Admin only)
+    async getUserReservations(userId, { page = 1, limit = 20 } = {}) {
+      try {
+        const user = await this.getUserById(userId);
+        if (!user) {
+          throw new Error('User not found');
+        }
+
+        const query = 'SELECT * FROM c WHERE c.userId = @userId ORDER BY c.createdAt DESC';
+        const parameters = [{ name: '@userId', value: userId }];
+
+        const results = await databaseService.queryItems('Reservations', query, parameters);
+        
+        // Calculate pagination
+        const total = results.length;
+        const startIndex = (page - 1) * limit;
+        const endIndex = startIndex + limit;
+        const paginatedResults = results.slice(startIndex, endIndex);
+
+        return {
+          reservations: paginatedResults,
+          total,
+          page,
+          limit,
+          user: this.sanitizeUser(user)
+        };
+      } catch (error) {
+        logger.error('Get user reservations error:', error);
+        throw error;
+      }
+    }
+
+    // Helper method to sanitize user data
+    sanitizeUser(user) {
+      if (!user) return null;
+      
+      const { passwordHash, ...sanitizedUser } = user;
+      return sanitizedUser;
+    }
+
+    // Create default admin user if none exists
+    async createDefaultAdmin() {
+      try {
+        const adminQuery = 'SELECT * FROM c WHERE c.role = @role';
+        const adminParams = [{ name: '@role', value: 'admin' }];
+        const existingAdmins = await databaseService.queryItems('Users', adminQuery, adminParams);
+
+        if (existingAdmins.length === 0) {
+          const defaultAdmin = await this.createUser({
+            username: 'admin',
+            password: 'Admin123!',
+            role: 'admin'
+          });
+          
+          logger.info('Default admin user created');
+          return defaultAdmin;
+        }
+        
+        logger.info('Admin user already exists');
+        return null;
+      } catch (error) {
+        logger.error('Create default admin error:', error);
+        throw error;
+      }
+  }
 }
+
 
 module.exports = new AuthService();
