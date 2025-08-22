@@ -1,7 +1,7 @@
 const express = require('express');
 const { body } = require('express-validator');
 const authController = require('../controllers/authController');
-const { authenticateToken, requireAdmin } = require('../middleware/auth');
+const { authenticateToken, requireAdmin, loginLimiter } = require('../middleware/auth');
 const { validate } = require('../middleware/validation');
 
 const router = express.Router();
@@ -30,19 +30,35 @@ const bulkCreateValidation = [
   body('defaultPassword').optional().isLength({ min: 8 }).withMessage('Default password must be at least 8 characters'),
 ];
 
-// Public routes
-router.post('/login', validate(loginValidation), authController.login);
+const changePasswordValidation = [
+  body('newPassword')
+    .isLength({ min: 8 })
+    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
+    .withMessage('Password must be at least 8 characters with uppercase, lowercase, and number'),
+];
 
-// Protected routes (require authentication)
+// ===== PUBLIC ROUTES =====
+// ✅ FIXED: Apply rate limiting to login
+router.post('/login', loginLimiter, validate(loginValidation), authController.login);
+
+// ===== PROTECTED ROUTES (require authentication) =====
 router.use(authenticateToken);
+
+// Core auth endpoints
 router.post('/logout', authController.logout);
 router.get('/profile', authController.getProfile);
+router.get('/verify', authController.verifyToken); // ✅ NEW: Token verification endpoint
 
-// Admin only routes
-router.post('/register', requireAdmin, validate(createUserValidation), authController.createUser);
-router.post('/bulk-create', requireAdmin, validate(bulkCreateValidation), authController.createApartmentUsers);
-router.get('/users', requireAdmin, authController.getAllUsers);
-router.put('/users/:userId/password', requireAdmin, authController.changeUserPassword);
-router.delete('/users/:userId', requireAdmin, authController.deactivateUser);
+// ===== ADMIN ONLY ROUTES =====
+router.use(requireAdmin);
+
+// User management
+router.post('/register', validate(createUserValidation), authController.createUser);
+router.post('/bulk-create', validate(bulkCreateValidation), authController.createApartmentUsers);
+router.get('/users', authController.getAllUsers);
+router.get('/users/:userId', authController.getUserById); // ✅ NEW: Get single user
+router.put('/users/:userId/password', validate(changePasswordValidation), authController.changeUserPassword);
+router.delete('/users/:userId', authController.deactivateUser);
+router.put('/users/:userId/activate', authController.activateUser); // ✅ NEW: Activate user
 
 module.exports = router;
