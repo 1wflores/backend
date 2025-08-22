@@ -53,310 +53,204 @@ class ReservationService {
         status: requiresApproval ? 'pending' : 'approved',
         specialRequests,
         createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        createdBy: reservationData.userId,
       };
 
-      const createdReservation = await databaseService.createItem('Reservations', reservation);
+      const result = await databaseService.createItem('Reservations', reservation);
+      logger.info('Reservation created:', result.id);
       
-      logger.info(`Reservation created: ${reservation.id} for amenity ${amenity.name}`);
-      return await this.enrichReservationWithUserData(createdReservation);
+      return result;
     } catch (error) {
       logger.error('Create reservation error:', error);
       throw error;
     }
   }
 
-  async getUserReservations(userId, filters = {}) {
-    try {
-      let query = 'SELECT * FROM c WHERE c.userId = @userId';
-      const parameters = [{ name: '@userId', value: userId }];
-
-      if (filters.status) {
-        query += ' AND c.status = @status';
-        parameters.push({ name: '@status', value: filters.status });
-      }
-
-      if (filters.startDate) {
-        query += ' AND c.startTime >= @startDate';
-        parameters.push({ name: '@startDate', value: filters.startDate });
-      }
-
-      if (filters.endDate) {
-        query += ' AND c.startTime <= @endDate';
-        parameters.push({ name: '@endDate', value: filters.endDate });
-      }
-
-      query += ' ORDER BY c.startTime DESC';
-
-      const reservations = await databaseService.queryItems('Reservations', query, parameters);
-      return reservations;
-    } catch (error) {
-      logger.error('Get user reservations error:', error);
-      throw error;
+  checkIfRequiresApproval(amenity, durationMinutes, specialRequests) {
+    // Check if amenity requires approval by default
+    if (amenity.requiresApproval) {
+      return true;
     }
+    
+    // Check auto-approval rules
+    if (amenity.autoApprovalRules) {
+      const rules = amenity.autoApprovalRules;
+      
+      // Check duration limit
+      if (rules.maxDurationMinutes && durationMinutes > rules.maxDurationMinutes) {
+        return true;
+      }
+      
+      // Check visitor count limit
+      if (rules.maxVisitors && specialRequests.visitorCount > rules.maxVisitors) {
+        return true;
+      }
+    }
+    
+    // Check special requests that require approval
+    if (specialRequests.grillUsage && !amenity.allowGrillUsage) {
+      return true;
+    }
+    
+    return false;
   }
 
-  async getAllReservations(filters = {}) {
+  // FIXED: Enhanced generateAvailableSlots with better error handling and data structure normalization
+  generateAvailableSlots(amenity, date, existingReservations) {
+    const slots = [];
+    
     try {
-      let query = 'SELECT * FROM c WHERE 1=1';
-      const parameters = [];
-
-      if (filters.status) {
-        query += ' AND c.status = @status';
-        parameters.push({ name: '@status', value: filters.status });
-      }
-
-      if (filters.amenityId) {
-        query += ' AND c.amenityId = @amenityId';
-        parameters.push({ name: '@amenityId', value: filters.amenityId });
-      }
-
-      if (filters.startDate) {
-        query += ' AND c.startTime >= @startDate';
-        parameters.push({ name: '@startDate', value: filters.startDate });
-      }
-
-      if (filters.endDate) {
-        query += ' AND c.startTime <= @endDate';
-        parameters.push({ name: '@endDate', value: filters.endDate });
-      }
-
-      query += ' ORDER BY c.createdAt DESC';
-
-      const reservations = await databaseService.queryItems('Reservations', query, parameters);
-      return await this.enrichReservationsWithUserData(reservations);
-    } catch (error) {
-      logger.error('Get all reservations error:', error);
-      throw error;
-    }
-  }
-
-  // FIXED: Use query instead of direct item access
-  async getReservationById(id) {
-    try {
-      logger.info(`Looking for reservation with ID: ${id}`);
+      // FIXED: Normalize operating hours structure
+      const operatingHours = this.normalizeOperatingHours(amenity.operatingHours);
       
-      // FIX: Use query instead of direct item access since that's working
-      const query = 'SELECT * FROM c WHERE c.id = @id';
-      const parameters = [{ name: '@id', value: id }];
-      
-      const reservations = await databaseService.queryItems('Reservations', query, parameters);
-      
-      if (reservations.length === 0) {
-        logger.warn(`Reservation not found in database: ${id}`);
-        return null;
+      if (!operatingHours) {
+        logger.warn('No operating hours found for amenity:', amenity.id);
+        return slots;
       }
       
-      const reservation = reservations[0];
-      logger.info(`Found reservation: ${reservation.id}, status: ${reservation.status}, user: ${reservation.userId}`);
+      const requestDate = new Date(date);
+      const dayOfWeek = requestDate.getDay();
       
-      return await this.enrichReservationWithUserData(reservation);
-    } catch (error) {
-      logger.error('Get reservation by ID error:', error);
-      throw error;
-    }
-  }
-
-  // COMPLETE WITH QUERY-BASED UPDATE
-  async updateReservationStatus(id, status, denialReason = null) {
-    try {
-      logger.info(`Starting status update for reservation: ${id} to ${status}`);
-      
-      const reservation = await this.getReservationById(id);
-      if (!reservation) {
-        logger.warn(`Reservation not found during status update: ${id}`);
-        return null;
-      }
-
-      logger.info(`Current reservation status: ${reservation.status}`);
-
-      // Validate status transition
-      if (reservation.status === 'approved' || reservation.status === 'denied') {
-        logger.warn(`Attempting to modify already processed reservation ${id}: current status is ${reservation.status}`);
-        throw new Error('Cannot modify already processed reservation');
-      }
-
-      // Validate status value
-      if (!['approved', 'denied', 'cancelled'].includes(status)) {
-        logger.error(`Invalid status value: ${status}`);
-        throw new Error('Invalid status value');
-      }
-
-      // Handle denial reason
-      if (status === 'denied' && !denialReason) {
-        logger.warn(`Reservation ${id} denied without reason`);
-        denialReason = 'No reason provided';
-      }
-
-      const updatedReservation = {
-        ...reservation,
-        status,
-        denialReason: status === 'denied' ? denialReason : null,
-        processedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-
-      logger.info(`Updating reservation ${id} in database using query-based update...`);
-      
-      // FIX: Use query-based update instead of direct item update
-      const updated = await this.updateReservationByQuery(id, updatedReservation);
-      
-      if (!updated) {
-        logger.error(`Failed to update reservation ${id}`);
-        throw new Error('Failed to update reservation in database');
+      // Check if amenity operates on this day
+      if (!operatingHours.days || !operatingHours.days.includes(dayOfWeek)) {
+        logger.info('Amenity does not operate on day:', dayOfWeek);
+        return slots;
       }
       
-      logger.info(`Successfully updated reservation ${id} status to ${status}`);
+      // FIXED: Safe parsing of start and end times
+      const { startHour, startMinute, endHour, endMinute } = this.parseOperatingTimes(operatingHours);
       
-      return await this.enrichReservationWithUserData(updated);
-    } catch (error) {
-      logger.error('Update reservation status error:', error);
-      throw error;
-    }
-  }
-
-  // NEW: Query-based update method
-  async updateReservationByQuery(id, updatedData) {
-    try {
-      logger.info(`Performing query-based update for reservation ${id}`);
-      
-      // First, get the current item to ensure we have the latest version
-      const query = 'SELECT * FROM c WHERE c.id = @id';
-      const parameters = [{ name: '@id', value: id }];
-      
-      const results = await databaseService.queryItems('Reservations', query, parameters);
-      
-      if (results.length === 0) {
-        logger.warn(`Reservation ${id} not found for update`);
-        return null;
+      if (startHour === null || endHour === null) {
+        logger.warn('Could not parse operating times for amenity:', amenity.id);
+        return slots;
       }
       
-      const currentItem = results[0];
-      logger.info(`Found current item for update: ${currentItem.id}`);
-      
-      // Create the updated item with all required Cosmos DB properties
-      const itemToUpdate = {
-        ...updatedData,
-        id: id, // Ensure ID is preserved
-        _rid: currentItem._rid, // Preserve Cosmos DB internal properties
-        _self: currentItem._self,
-        _etag: currentItem._etag,
-        _attachments: currentItem._attachments,
-        _ts: currentItem._ts
-      };
-      
-      // Use the working databaseService.createItem to "upsert" (will replace if exists)
-      const result = await databaseService.createItem('Reservations', itemToUpdate);
-      
-      logger.info(`Query-based update completed for reservation ${id}`);
-      return result;
-      
-    } catch (error) {
-      // If createItem fails because item exists, try direct replace one more time
-      if (error.code === 409) { // Conflict - item exists
-        logger.info(`Item exists, attempting direct replace for ${id}`);
-        try {
-          return await databaseService.updateItem('Reservations', updatedData);
-        } catch (replaceError) {
-          logger.error(`Both create and replace failed for ${id}:`, replaceError);
-          throw replaceError;
-        }
-      }
-      
-      logger.error(`Query-based update failed for ${id}:`, error);
-      throw error;
-    }
-  }
-
-  // DEBUG METHOD - Add temporarily to understand database access issues
-  async debugReservationExists(id) {
-    try {
-      logger.info(`DIAGNOSIS: Testing different access methods for reservation ${id}`);
-      
-      // Method 1: Direct item access (the failing one)
-      try {
-        logger.info(`Testing direct item access...`);
-        const directResult = await databaseService.getItem('Reservations', id);
-        logger.info(`Direct access result:`, directResult ? 'FOUND' : 'NOT FOUND');
-      } catch (error) {
-        logger.error(`Direct access error:`, error.message);
-      }
-      
-      // Method 2: Direct item access with explicit partition key
-      try {
-        logger.info(`Testing direct item access with explicit partition key...`);
-        const directWithPKResult = await databaseService.getItem('Reservations', id, id);
-        logger.info(`Direct with PK result:`, directWithPKResult ? 'FOUND' : 'NOT FOUND');
-      } catch (error) {
-        logger.error(`Direct with PK access error:`, error.message);
-      }
-      
-      // Method 3: Query access (the working one)
-      try {
-        logger.info(`Testing query access...`);
-        const query = 'SELECT * FROM c WHERE c.id = @id';
-        const parameters = [{ name: '@id', value: id }];
-        const queryResult = await databaseService.queryItems('Reservations', query, parameters);
-        logger.info(`Query access result:`, queryResult.length > 0 ? `FOUND (${queryResult.length} items)` : 'NOT FOUND');
+      // Generate hourly slots (you can adjust the interval as needed)
+      for (let hour = startHour; hour < endHour; hour++) {
+        const slotStart = new Date(requestDate);
+        slotStart.setHours(hour, startMinute || 0, 0, 0);
         
-        if (queryResult.length > 0) {
-          const item = queryResult[0];
-          logger.info(`Item details:`, {
-            id: item.id,
-            partitionKeyValue: item.id, // Show what the partition key value should be
-            status: item.status,
-            createdAt: item.createdAt
+        const slotEnd = new Date(slotStart);
+        slotEnd.setHours(hour + 1, startMinute || 0, 0, 0);
+        
+        // Ensure slot end doesn't exceed operating hours
+        const operatingEnd = new Date(requestDate);
+        operatingEnd.setHours(endHour, endMinute || 0, 0, 0);
+        
+        if (slotEnd > operatingEnd) {
+          slotEnd.setHours(endHour, endMinute || 0, 0, 0);
+        }
+        
+        // Skip slots that are too short
+        if ((slotEnd - slotStart) < 30 * 60 * 1000) { // Less than 30 minutes
+          continue;
+        }
+        
+        // Check if slot conflicts with existing reservations
+        const hasConflict = existingReservations.some(reservation => {
+          const resStart = new Date(reservation.startTime);
+          const resEnd = new Date(reservation.endTime);
+          return (slotStart < resEnd && slotEnd > resStart);
+        });
+        
+        if (!hasConflict) {
+          slots.push({
+            startTime: slotStart.toISOString(),
+            endTime: slotEnd.toISOString(),
+            available: true,
+            autoApproval: !this.checkIfRequiresApproval(amenity, 60, {}) // Assume 1-hour slot
           });
         }
-      } catch (error) {
-        logger.error(`Query access error:`, error.message);
       }
       
+      return slots;
     } catch (error) {
-      logger.error('Diagnosis error:', error);
+      logger.error('Error generating available slots:', error);
+      return slots; // Return empty array on error
     }
   }
 
-  async cancelReservation(id, userId, userRole) {
-    try {
-      const reservation = await this.getReservationById(id);
-      if (!reservation) {
-        return null;
-      }
-
-      // Check permissions
-      if (userRole !== 'admin' && reservation.userId !== userId) {
-        throw new Error('Access denied');
-      }
-
-      // Check if reservation can be cancelled
-      if (reservation.status === 'cancelled') {
-        throw new Error('Reservation is already cancelled');
-      }
-
-      const now = new Date();
-      const startTime = new Date(reservation.startTime);
-
-      // Don't allow cancellation of past reservations
-      if (startTime <= now) {
-        throw new Error('Cannot cancel past reservations');
-      }
-
-      const updatedReservation = {
-        ...reservation,
-        status: 'cancelled',
-        cancelledAt: now.toISOString(),
-        updatedAt: now.toISOString()
-      };
-
-      const updated = await this.updateReservationByQuery(id, updatedReservation);
-      
-      logger.info(`Reservation ${id} cancelled by user ${userId}`);
-      return await this.enrichReservationWithUserData(updated);
-    } catch (error) {
-      logger.error('Cancel reservation error:', error);
-      throw error;
+  // FIXED: New method to normalize different operating hours structures
+  normalizeOperatingHours(operatingHours) {
+    if (!operatingHours) return null;
+    
+    // Handle different possible structures
+    let normalized = {
+      days: operatingHours.days || [1, 2, 3, 4, 5, 6, 0], // Default to all days
+      start: null,
+      end: null
+    };
+    
+    // Try different property names for start time
+    if (operatingHours.start) {
+      normalized.start = operatingHours.start;
+    } else if (operatingHours.startTime) {
+      normalized.start = operatingHours.startTime;
+    } else if (operatingHours.openTime) {
+      normalized.start = operatingHours.openTime;
     }
+    
+    // Try different property names for end time
+    if (operatingHours.end) {
+      normalized.end = operatingHours.end;
+    } else if (operatingHours.endTime) {
+      normalized.end = operatingHours.endTime;
+    } else if (operatingHours.closeTime) {
+      normalized.end = operatingHours.closeTime;
+    }
+    
+    // Fallback to default hours if nothing found
+    if (!normalized.start) normalized.start = '06:00';
+    if (!normalized.end) normalized.end = '22:00';
+    
+    return normalized;
+  }
+
+  // FIXED: New method to safely parse operating times
+  parseOperatingTimes(operatingHours) {
+    let startHour = null, startMinute = 0, endHour = null, endMinute = 0;
+    
+    try {
+      // Parse start time
+      if (operatingHours.start && typeof operatingHours.start === 'string') {
+        const startParts = operatingHours.start.split(':');
+        if (startParts.length >= 2) {
+          startHour = parseInt(startParts[0]);
+          startMinute = parseInt(startParts[1]) || 0;
+        }
+      }
+      
+      // Parse end time
+      if (operatingHours.end && typeof operatingHours.end === 'string') {
+        const endParts = operatingHours.end.split(':');
+        if (endParts.length >= 2) {
+          endHour = parseInt(endParts[0]);
+          endMinute = parseInt(endParts[1]) || 0;
+        }
+      }
+      
+      // Validate parsed values
+      if (isNaN(startHour) || startHour < 0 || startHour > 23) startHour = 6;
+      if (isNaN(endHour) || endHour < 0 || endHour > 23) endHour = 22;
+      if (isNaN(startMinute) || startMinute < 0 || startMinute > 59) startMinute = 0;
+      if (isNaN(endMinute) || endMinute < 0 || endMinute > 59) endMinute = 0;
+      
+      // Ensure end is after start
+      if (endHour <= startHour) {
+        endHour = startHour + 1;
+        if (endHour > 23) endHour = 23;
+      }
+      
+    } catch (error) {
+      logger.error('Error parsing operating times:', error);
+      // Return default values
+      startHour = 6;
+      startMinute = 0;
+      endHour = 22;
+      endMinute = 0;
+    }
+    
+    return { startHour, startMinute, endHour, endMinute };
   }
 
   async getAvailableSlots(amenityId, date) {
@@ -429,98 +323,6 @@ class ReservationService {
     }
   }
 
-  async getReservationsByAmenity(amenityId, startDate, endDate) {
-    try {
-      let query = 'SELECT * FROM c WHERE c.amenityId = @amenityId';
-      const parameters = [{ name: '@amenityId', value: amenityId }];
-
-      if (startDate) {
-        query += ' AND c.startTime >= @startDate';
-        parameters.push({ name: '@startDate', value: startDate });
-      }
-
-      if (endDate) {
-        query += ' AND c.startTime <= @endDate';
-        parameters.push({ name: '@endDate', value: endDate });
-      }
-
-      query += ' ORDER BY c.startTime ASC';
-
-      const reservations = await databaseService.queryItems('Reservations', query, parameters);
-      return await this.enrichReservationsWithUserData(reservations);
-    } catch (error) {
-      logger.error('Get reservations by amenity error:', error);
-      throw error;
-    }
-  }
-
-  // Helper methods
-  checkIfRequiresApproval(amenity, durationMinutes, specialRequests) {
-    const rules = amenity.autoApprovalRules;
-    
-    if (!rules) return true;
-    
-    // Check duration
-    if (durationMinutes > rules.maxDurationMinutes) {
-      return true;
-    }
-    
-    // Check special requirements
-    if (specialRequests.visitorCount && specialRequests.visitorCount > (rules.maxVisitors || 4)) {
-      return true;
-    }
-    
-    if (specialRequests.grillUsage && !rules.allowGrillUsage) {
-      return true;
-    }
-    
-    return false;
-  }
-
-  generateAvailableSlots(amenity, date, existingReservations) {
-    const slots = [];
-    const operatingHours = amenity.operatingHours;
-    
-    if (!operatingHours) return slots;
-    
-    const requestDate = new Date(date);
-    const dayOfWeek = requestDate.getDay();
-    
-    // Check if amenity operates on this day
-    if (!operatingHours.days.includes(dayOfWeek)) {
-      return slots;
-    }
-    
-    // Generate slots (simplified - you can enhance this logic)
-    const startHour = parseInt(operatingHours.startTime.split(':')[0]);
-    const endHour = parseInt(operatingHours.endTime.split(':')[0]);
-    
-    for (let hour = startHour; hour < endHour; hour++) {
-      const slotStart = new Date(requestDate);
-      slotStart.setHours(hour, 0, 0, 0);
-      
-      const slotEnd = new Date(slotStart);
-      slotEnd.setHours(hour + 1, 0, 0, 0);
-      
-      // Check if slot conflicts with existing reservations
-      const hasConflict = existingReservations.some(reservation => {
-        const resStart = new Date(reservation.startTime);
-        const resEnd = new Date(reservation.endTime);
-        return (slotStart < resEnd && slotEnd > resStart);
-      });
-      
-      if (!hasConflict) {
-        slots.push({
-          startTime: slotStart.toISOString(),
-          endTime: slotEnd.toISOString(),
-          available: true
-        });
-      }
-    }
-    
-    return slots;
-  }
-
   async enrichReservationWithUserData(reservation) {
     try {
       if (!reservation) return null;
@@ -528,7 +330,8 @@ class ReservationService {
       const user = await authService.getUserById(reservation.userId);
       return {
         ...reservation,
-        userName: user ? user.username : 'Unknown User'
+        userName: user ? user.username : 'Unknown User',
+        user: user // Add full user object for better apartment extraction
       };
     } catch (error) {
       logger.warn('Could not enrich reservation with user data:', error.message);
@@ -545,6 +348,69 @@ class ReservationService {
     } catch (error) {
       logger.error('Error enriching reservations with user data:', error);
       return reservations;
+    }
+  }
+
+  // Additional methods for reservation management
+  async updateReservationStatus(reservationId, status, reason = null) {
+    try {
+      const reservation = await databaseService.getItem('Reservations', reservationId);
+      if (!reservation) {
+        throw new Error('Reservation not found');
+      }
+
+      const updatedReservation = {
+        ...reservation,
+        status,
+        ...(reason && { rejectionReason: reason }),
+        updatedAt: new Date().toISOString()
+      };
+
+      return await databaseService.updateItem('Reservations', reservationId, updatedReservation);
+    } catch (error) {
+      logger.error('Update reservation status error:', error);
+      throw error;
+    }
+  }
+
+  async getUserReservations(userId, limit = 50) {
+    try {
+      const query = `
+        SELECT * FROM c 
+        WHERE c.userId = @userId 
+        ORDER BY c.createdAt DESC
+        OFFSET 0 LIMIT @limit
+      `;
+      
+      const parameters = [
+        { name: '@userId', value: userId },
+        { name: '@limit', value: limit }
+      ];
+
+      return await databaseService.queryItems('Reservations', query, parameters);
+    } catch (error) {
+      logger.error('Get user reservations error:', error);
+      throw error;
+    }
+  }
+
+  async getAllReservations(limit = 100) {
+    try {
+      const query = `
+        SELECT * FROM c 
+        ORDER BY c.createdAt DESC
+        OFFSET 0 LIMIT @limit
+      `;
+      
+      const parameters = [
+        { name: '@limit', value: limit }
+      ];
+
+      const reservations = await databaseService.queryItems('Reservations', query, parameters);
+      return await this.enrichReservationsWithUserData(reservations);
+    } catch (error) {
+      logger.error('Get all reservations error:', error);
+      throw error;
     }
   }
 }
