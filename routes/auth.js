@@ -8,8 +8,17 @@ const router = express.Router();
 
 // Validation rules
 const loginValidation = [
-  body('username').isString().notEmpty().withMessage('Username is required'),
-  body('password').isString().notEmpty().withMessage('Password is required'),
+  body('username')
+    .trim()
+    .notEmpty()
+    .withMessage('Username is required')
+    .isLength({ min: 1, max: 50 })
+    .withMessage('Username must be between 1 and 50 characters'),
+  body('password')
+    .notEmpty()
+    .withMessage('Password is required')
+    .isLength({ min: 1, max: 100 })
+    .withMessage('Password must be between 1 and 100 characters'),
 ];
 
 const createUserValidation = [

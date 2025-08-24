@@ -10,10 +10,20 @@ const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
-    logger.warn(`Rate limit exceeded for IP: ${req.ip}`);
+    const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
+    const userAgent = req.get('User-Agent') || 'unknown';
+    const attemptedUsername = req.body?.username || 'unknown';
+    
+    logger.warn(`=== RATE LIMIT EXCEEDED ===`);
+    logger.warn(`IP: ${clientIP}`);
+    logger.warn(`User Agent: ${userAgent}`);
+    logger.warn(`Attempted Username: ${attemptedUsername}`);
+    logger.warn(`Timestamp: ${new Date().toISOString()}`);
+    
     res.status(429).json({
       success: false,
-      message: 'Too many login attempts. Please try again in 15 minutes.'
+      message: 'Too many login attempts. Please try again in 15 minutes.',
+      retryAfter: Math.ceil(req.rateLimit.resetTime / 1000)
     });
   }
 });

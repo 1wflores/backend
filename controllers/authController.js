@@ -9,16 +9,16 @@ class AuthController {
       const { username, password } = req.body;
       
       logger.info('=== LOGIN ATTEMPT ===');
-      logger.info('Username:', username);
-      logger.info('Request IP:', req.ip);
-      logger.info('User Agent:', req.get('User-Agent'));
+      logger.info(`Username: ${username}`);
+      logger.info(`Request IP: ${req.ip || 'unknown'}`);
+      logger.info(`User Agent: ${req.get('User-Agent') || 'unknown'}`);
       
       const result = await authService.login(username, password);
       
       logger.info('=== LOGIN SUCCESS ===');
-      logger.info('User authenticated:', result.user.username);
-      logger.info('User role:', result.user.role);
-      logger.info('User ID:', result.user.id);
+      logger.info(`User authenticated: ${result.user.username}`);
+      logger.info(`User role: ${result.user.role}`);
+      logger.info(`User ID: ${result.user.id}`);
       
       res.json({
         success: true,
@@ -37,14 +37,16 @@ class AuthController {
       });
     } catch (error) {
       logger.error('=== LOGIN FAILED ===');
-      logger.error('Error message:', error.message);
-      logger.error('Username attempted:', req.body.username);
-      logger.error('Request IP:', req.ip);
+      logger.error(`Error message: ${error.message}`);
+      logger.error(`Username attempted: ${req.body?.username || 'unknown'}`);
+      logger.error(`Request IP: ${req.ip || 'unknown'}`);
+      logger.error(`User Agent: ${req.get('User-Agent') || 'unknown'}`);
       
       // Don't reveal specific error details for security
       const isCredentialError = error.message.includes('Invalid') || 
-                               error.message.includes('not found') ||
-                               error.message.includes('incorrect');
+                              error.message.includes('not found') ||
+                              error.message.includes('incorrect') ||
+                              error.message.includes('password');
       
       res.status(401).json({
         success: false,

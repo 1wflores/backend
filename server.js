@@ -13,6 +13,24 @@ console.log('🔌 Port:', process.env.PORT || 8080);
 
 const app = express();
 
+// Enhanced request logging for debugging
+app.use((req, res, next) => {
+  const timestamp = new Date().toISOString();
+  const clientIP = req.ip || req.connection.remoteAddress;
+  const userAgent = req.get('User-Agent');
+  
+  console.log(`[${timestamp}] ${req.method} ${req.url} - IP: ${clientIP} - UA: ${userAgent}`);
+  
+  if (req.body && Object.keys(req.body).length > 0) {
+    // Log body but mask sensitive data
+    const sanitizedBody = { ...req.body };
+    if (sanitizedBody.password) sanitizedBody.password = '[MASKED]';
+    console.log(`Request body:`, sanitizedBody);
+  }
+  
+  next();
+});
+
 // Import after app initialization
 const routes = require('./routes');
 const userRoutes = require('./routes/userRoutes'); // ✅ NEW: User management routes
