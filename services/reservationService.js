@@ -456,14 +456,46 @@ class ReservationService {
   }
 
   // ✅ NEW: Generate time slots avoiding existing reservations
-  generateTimeSlots(amenity, date, duration, existingReservations) {
-    const slots = [];
-    const slotDuration = duration * 60 * 1000; // Convert to milliseconds
+  // ✅ REPLACE WITH THIS FIXED CODE:
+generateTimeSlots(amenity, date, duration, existingReservations) {
+  const slots = [];
+  const slotDuration = duration * 60 * 1000; // Convert to milliseconds
 
-    // Parse amenity operating hours (assuming format like "09:00-21:00")
-    const operatingHours = amenity.operatingHours || "09:00-21:00";
-    const [startHour, endHour] = operatingHours.split('-');
-    
+  // ✅ FIXED: Handle both string and object formats for operatingHours
+  let startHour, endHour;
+
+  // Get operating hours with same fallback logic
+  const operatingHours = amenity.operatingHours || "09:00-21:00";
+
+  try {
+    if (typeof operatingHours === 'string') {
+      // Handle original string format "09:00-21:00"
+      [startHour, endHour] = operatingHours.split('-');
+    } else if (typeof operatingHours === 'object' && operatingHours !== null) {
+      // Handle object format { start: "09:00", end: "21:00", days: [...] }
+      
+      // Check if amenity operates on this day
+      if (operatingHours.days && Array.isArray(operatingHours.days)) {
+        const dayOfWeek = new Date(date).getDay();
+        if (!operatingHours.days.includes(dayOfWeek)) {
+          return slots; // Return empty if closed on this day
+        }
+      }
+      
+      // Extract times from object structure
+      startHour = operatingHours.start || "09:00";
+      endHour = operatingHours.end || "21:00";
+    } else {
+      // Fallback to default
+      [startHour, endHour] = "09:00-21:00".split('-');
+    }
+
+    // Validate extracted times
+    if (!startHour || !endHour) {
+      return slots;
+    }
+
+    // ✅ PRESERVE: All remaining logic stays exactly the same
     const startTime = new Date(`${date}T${startHour}:00.000Z`);
     const endTime = new Date(`${date}T${endHour}:00.000Z`);
 
@@ -494,7 +526,12 @@ class ReservationService {
     }
 
     return slots;
+
+  } catch (error) {
+    console.error(`Error generating time slots for amenity ${amenity.id}:`, error);
+    return slots;
   }
+}
 
   async getConflictingReservations(amenityId, startTime, endTime) {
     try {
