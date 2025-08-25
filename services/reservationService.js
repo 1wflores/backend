@@ -221,6 +221,35 @@ class ReservationService {
     }
   }
 
+  // ✅ MISSING METHOD: getReservationById - ADDED TO FIX 404 ERRORS
+  async getReservationById(reservationId) {
+    try {
+      logger.info(`📋 Getting reservation by ID: ${reservationId}`);
+      
+      const reservation = await databaseService.getItem('Reservations', reservationId);
+      
+      if (!reservation) {
+        logger.warn(`❌ Reservation not found: ${reservationId}`);
+        return null;
+      }
+      
+      logger.info(`✅ Found reservation:`, {
+        id: reservation.id,
+        userId: reservation.userId,
+        amenityId: reservation.amenityId,
+        status: reservation.status
+      });
+      
+      // Enrich with user data if needed
+      const enrichedReservation = await this.enrichReservationWithUserData(reservation);
+      
+      return enrichedReservation;
+    } catch (error) {
+      logger.error(`Error getting reservation by ID ${reservationId}:`, error);
+      throw error;
+    }
+  }
+
   checkIfRequiresApproval(amenity, durationMinutes, specialRequests) {
     // Check if amenity requires approval by default
     if (amenity.requiresApproval) {
