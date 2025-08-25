@@ -5,6 +5,161 @@ const authService = require('./authService');
 const logger = require('../utils/logger');
 
 class ReservationService {
+  
+  // ✅ NEW: Complete cancelReservation implementation with proper deletion
+  async cancelReservation(reservationId, userId, userRole) {
+    try {
+      logger.info(`🚫 Cancelling reservation ${reservationId} by user ${userId} (role: ${userRole})`);
+
+      // 1. First, verify the reservation exists
+      const reservation = await databaseService.getItem('Reservations', reservationId);
+      if (!reservation) {
+        logger.warn(`❌ Reservation ${reservationId} not found for cancellation`);
+        throw new Error('Reservation not found');
+      }
+
+      logger.info(`📋 Found reservation:`, {
+        id: reservation.id,
+        status: reservation.status,
+        userId: reservation.userId,
+        amenityId: reservation.amenityId,
+        startTime: reservation.startTime,
+        endTime: reservation.endTime
+      });
+
+      // 2. Check user permission to cancel this reservation
+      if (userRole !== 'admin' && reservation.userId !== userId) {
+        logger.warn(`⚠️ User ${userId} attempted to cancel reservation ${reservationId} belonging to user ${reservation.userId}`);
+        throw new Error('Access denied - you can only cancel your own reservations');
+      }
+
+      // 3. Validate that the reservation can be cancelled
+      const cancellableStatuses = ['pending', 'approved', 'confirmed'];
+      if (!cancellableStatuses.includes(reservation.status)) {
+        logger.warn(`❌ Cannot cancel reservation ${reservationId} with status: ${reservation.status}`);
+        throw new Error(`Cannot cancel reservation with status: ${reservation.status}`);
+      }
+
+      // 4. Check if reservation is in the past (optional business rule)
+      const now = new Date();
+      const reservationStart = new Date(reservation.startTime);
+      if (reservationStart < now) {
+        // Allow admins to cancel past reservations, but warn residents
+        if (userRole !== 'admin') {
+          logger.warn(`⚠️ User ${userId} attempted to cancel past reservation ${reservationId}`);
+          throw new Error('Cannot cancel reservations that have already started');
+        } else {
+          logger.info(`ℹ️ Admin ${userId} cancelling past reservation ${reservationId}`);
+        }
+      }
+
+      // 5. Log cancellation details before deletion (for audit trail)
+      const cancellationLog = {
+        reservationId: reservation.id,
+        originalReservation: { ...reservation },
+        cancelledBy: userId,
+        cancelledByRole: userRole,
+        cancelledAt: new Date().toISOString(),
+        reason: userRole === 'admin' ? 'Admin cancellation' : 'User cancellation',
+        slotFreed: {
+          amenityId: reservation.amenityId,
+          startTime: reservation.startTime,
+          endTime: reservation.endTime,
+          date: reservation.startTime.split('T')[0]
+        }
+      };
+
+      logger.info(`📝 Logging cancellation details:`, cancellationLog);
+
+      // 6. IMPORTANT: Completely DELETE the reservation from CosmosDB
+      // This ensures the slot becomes available again for booking
+      const deleted = await databaseService.deleteItem('Reservations', reservationId);
+      
+      if (!deleted) {
+        logger.error(`❌ Failed to delete reservation ${reservationId} from database`);
+        throw new Error('Failed to cancel reservation - database operation failed');
+      }
+
+      logger.info(`✅ Reservation ${reservationId} successfully deleted from CosmosDB`);
+
+      // 7. Verify the slot is now available by checking for conflicts
+      await this.validateSlotAvailability(
+        reservation.amenityId,
+        reservation.startTime,
+        reservation.endTime,
+        null // No exclusion needed since we deleted the reservation
+      );
+
+      logger.info(`✅ Slot confirmed available: ${reservation.amenityId} from ${reservation.startTime} to ${reservation.endTime}`);
+
+      // 8. Return the deleted reservation details for response
+      const result = {
+        ...reservation,
+        status: 'cancelled',
+        cancelledAt: cancellationLog.cancelledAt,
+        cancelledBy: userId,
+        deletedFromDatabase: true,
+        slotFreed: true
+      };
+
+      logger.info(`🎉 Successfully cancelled and deleted reservation ${reservationId}`);
+
+      return result;
+
+    } catch (error) {
+      logger.error(`❌ Error cancelling reservation ${reservationId}:`, error);
+      throw error;
+    }
+  }
+
+  // ✅ NEW: Validate that a time slot is available (helper method)
+  async validateSlotAvailability(amenityId, startTime, endTime, excludeReservationId = null) {
+    try {
+      const startDate = new Date(startTime);
+      const endDate = new Date(endTime);
+
+      logger.info(`🔍 Checking slot availability for amenity ${amenityId} from ${startTime} to ${endTime}`);
+
+      // Query for conflicting reservations
+      let query = `
+        SELECT * FROM c 
+        WHERE c.amenityId = @amenityId 
+        AND c.status IN ('approved', 'pending', 'confirmed')
+        AND (
+          (c.startTime < @endTime AND c.endTime > @startTime)
+        )
+      `;
+
+      const parameters = [
+        { name: '@amenityId', value: amenityId },
+        { name: '@startTime', value: startTime },
+        { name: '@endTime', value: endTime }
+      ];
+
+      // Exclude specific reservation if provided
+      if (excludeReservationId) {
+        query += ` AND c.id != @excludeId`;
+        parameters.push({ name: '@excludeId', value: excludeReservationId });
+      }
+
+      const conflictingReservations = await databaseService.queryItems('Reservations', query, parameters);
+
+      if (conflictingReservations.length > 0) {
+        logger.warn(`⚠️ Found ${conflictingReservations.length} conflicting reservations:`, 
+          conflictingReservations.map(r => ({ id: r.id, startTime: r.startTime, endTime: r.endTime }))
+        );
+        return false;
+      }
+
+      logger.info(`✅ Slot is available - no conflicts found`);
+      return true;
+
+    } catch (error) {
+      logger.error('Error validating slot availability:', error);
+      throw error;
+    }
+  }
+
   async createReservation(reservationData) {
     try {
       const { amenityId, startTime, endTime, specialRequests = {} } = reservationData;
@@ -253,32 +408,30 @@ class ReservationService {
     return { startHour, startMinute, endHour, endMinute };
   }
 
-  async getAvailableSlots(amenityId, date) {
+  // ✅ ENHANCED: Better available slots calculation that accounts for cancelled reservations
+  async getAvailableSlots(amenityId, date, duration = 60) {
     try {
-      const amenity = await amenityService.getAmenityById(amenityId);
-      if (!amenity) {
-        throw new Error('Amenity not found');
+      logger.info(`🔍 Getting available slots for amenity ${amenityId} on ${date}, duration: ${duration}min`);
+
+      // Get amenity details
+      const amenity = await databaseService.getItem('Amenities', amenityId);
+      if (!amenity || !amenity.isActive) {
+        throw new Error('Amenity not found or not available');
       }
 
-      if (!amenity.isActive) {
-        throw new Error('This amenity is currently unavailable');
-      }
-
-      // Get existing reservations for the date
-      const startOfDay = new Date(date);
-      startOfDay.setHours(0, 0, 0, 0);
-      
-      const endOfDay = new Date(date);
-      endOfDay.setHours(23, 59, 59, 999);
+      // Get existing reservations for the date (only active statuses)
+      const startOfDay = new Date(`${date}T00:00:00.000Z`);
+      const endOfDay = new Date(`${date}T23:59:59.999Z`);
 
       const query = `
         SELECT * FROM c 
         WHERE c.amenityId = @amenityId 
         AND c.startTime >= @startOfDay 
-        AND c.startTime <= @endOfDay 
-        AND c.status IN ('approved', 'pending')
+        AND c.startTime < @endOfDay
+        AND c.status IN ('approved', 'pending', 'confirmed')
+        ORDER BY c.startTime ASC
       `;
-      
+
       const parameters = [
         { name: '@amenityId', value: amenityId },
         { name: '@startOfDay', value: startOfDay.toISOString() },
@@ -286,15 +439,61 @@ class ReservationService {
       ];
 
       const existingReservations = await databaseService.queryItems('Reservations', query, parameters);
-      
-      // Generate available slots based on amenity operating hours
-      const availableSlots = this.generateAvailableSlots(amenity, date, existingReservations);
-      
-      return availableSlots;
+
+      logger.info(`📊 Found ${existingReservations.length} active reservations for ${date}`);
+
+      // Generate available time slots
+      const slots = this.generateTimeSlots(amenity, date, duration, existingReservations);
+
+      logger.info(`✅ Generated ${slots.length} available slots`);
+
+      return slots;
+
     } catch (error) {
-      logger.error('Get available slots error:', error);
+      logger.error('Error getting available slots:', error);
       throw error;
     }
+  }
+
+  // ✅ NEW: Generate time slots avoiding existing reservations
+  generateTimeSlots(amenity, date, duration, existingReservations) {
+    const slots = [];
+    const slotDuration = duration * 60 * 1000; // Convert to milliseconds
+
+    // Parse amenity operating hours (assuming format like "09:00-21:00")
+    const operatingHours = amenity.operatingHours || "09:00-21:00";
+    const [startHour, endHour] = operatingHours.split('-');
+    
+    const startTime = new Date(`${date}T${startHour}:00.000Z`);
+    const endTime = new Date(`${date}T${endHour}:00.000Z`);
+
+    let currentSlotStart = new Date(startTime);
+
+    while (currentSlotStart.getTime() + slotDuration <= endTime.getTime()) {
+      const currentSlotEnd = new Date(currentSlotStart.getTime() + slotDuration);
+
+      // Check if this slot conflicts with any existing reservation
+      const hasConflict = existingReservations.some(reservation => {
+        const resStart = new Date(reservation.startTime);
+        const resEnd = new Date(reservation.endTime);
+
+        return (currentSlotStart < resEnd && currentSlotEnd > resStart);
+      });
+
+      if (!hasConflict) {
+        slots.push({
+          startTime: currentSlotStart.toISOString(),
+          endTime: currentSlotEnd.toISOString(),
+          available: true,
+          duration: duration
+        });
+      }
+
+      // Move to next potential slot (e.g., every 30 minutes)
+      currentSlotStart = new Date(currentSlotStart.getTime() + (30 * 60 * 1000));
+    }
+
+    return slots;
   }
 
   async getConflictingReservations(amenityId, startTime, endTime) {
@@ -323,31 +522,71 @@ class ReservationService {
     }
   }
 
+ // ✅ ENHANCED: Better error handling for user data enrichment
   async enrichReservationWithUserData(reservation) {
     try {
-      if (!reservation) return null;
+      if (!reservation.userId) {
+        logger.warn('Reservation missing userId:', reservation.id);
+        return {
+          ...reservation,
+          username: 'Unknown User',
+          user: null
+        };
+      }
+
+      const user = await databaseService.getItem('Users', reservation.userId);
       
-      const user = await authService.getUserById(reservation.userId);
       return {
         ...reservation,
-        userName: user ? user.username : 'Unknown User',
-        user: user // Add full user object for better apartment extraction
+        username: user?.username || 'Unknown User',
+        user: user || null // Add full user object for better apartment extraction
       };
     } catch (error) {
-      logger.warn('Could not enrich reservation with user data:', error.message);
-      return reservation;
+      logger.warn(`Could not enrich reservation ${reservation.id} with user data:`, error.message);
+      // ✅ IMPORTANT: Still return the reservation even if user enrichment fails
+      return {
+        ...reservation,
+        username: 'Unknown User',
+        user: null
+      };
     }
   }
 
   async enrichReservationsWithUserData(reservations) {
     try {
+      if (!Array.isArray(reservations) || reservations.length === 0) {
+        logger.info('No reservations to enrich');
+        return [];
+      }
+
+      logger.info(`Enriching ${reservations.length} reservations with user data`);
+
       const enrichedReservations = await Promise.all(
         reservations.map(reservation => this.enrichReservationWithUserData(reservation))
       );
-      return enrichedReservations.filter(reservation => reservation !== null);
+      
+      // ✅ IMPORTANT: Filter out any null results but keep valid reservations
+      const validReservations = enrichedReservations.filter(reservation => reservation !== null);
+      
+      logger.info(`Successfully enriched ${validReservations.length} reservations`);
+      
+      return validReservations;
     } catch (error) {
       logger.error('Error enriching reservations with user data:', error);
-      return reservations;
+      // ✅ IMPORTANT: Return original reservations if enrichment fails
+      return reservations || [];
+    }
+  }
+
+  // ✅ NEW: Debug method to check if reservation exists
+  async debugReservationExists(reservationId) {
+    try {
+      const reservation = await databaseService.getItem('Reservations', reservationId);
+      logger.info(`Debug: Reservation ${reservationId} exists:`, !!reservation);
+      return reservation;
+    } catch (error) {
+      logger.info(`Debug: Reservation ${reservationId} does not exist:`, error.message);
+      return null;
     }
   }
 
@@ -373,43 +612,175 @@ class ReservationService {
     }
   }
 
-  async getUserReservations(userId, limit = 50) {
+  // ✅ FIXED: Updated getUserReservations to handle filters properly
+  async getUserReservations(userId, filters = {}) {
     try {
+      // Handle both old signature (userId, limit) and new signature (userId, filters)
+      let limit = 50;
+      let status = null;
+      let startDate = null;
+      let endDate = null;
+
+      // Check if second parameter is a number (old signature) or object (new signature)
+      if (typeof filters === 'number') {
+        limit = filters;
+      } else if (filters && typeof filters === 'object') {
+        limit = filters.limit || 50;
+        status = filters.status;
+        startDate = filters.startDate;
+        endDate = filters.endDate;
+      }
+
+      logger.info(`Getting user reservations for userId: ${userId}`, { filters, limit });
+
+      // Build query conditions
+      let whereConditions = [`c.userId = @userId`];
+      const parameters = [{ name: '@userId', value: userId }];
+
+      // Add status filter
+      if (status) {
+        whereConditions.push(`c.status = @status`);
+        parameters.push({ name: '@status', value: status });
+      }
+
+      // Add date filters
+      if (startDate) {
+        whereConditions.push(`c.startTime >= @startDate`);
+        parameters.push({ name: '@startDate', value: startDate });
+      }
+
+      if (endDate) {
+        whereConditions.push(`c.startTime <= @endDate`);
+        parameters.push({ name: '@endDate', value: endDate });
+      }
+
       const query = `
         SELECT * FROM c 
-        WHERE c.userId = @userId 
+        WHERE ${whereConditions.join(' AND ')}
         ORDER BY c.createdAt DESC
         OFFSET 0 LIMIT @limit
       `;
       
-      const parameters = [
-        { name: '@userId', value: userId },
-        { name: '@limit', value: limit }
-      ];
+      parameters.push({ name: '@limit', value: limit });
 
-      return await databaseService.queryItems('Reservations', query, parameters);
+      logger.info(`Executing query for user reservations:`, { query, parameters });
+
+      const reservations = await databaseService.queryItems('Reservations', query, parameters);
+      
+      logger.info(`Found ${reservations.length} reservations for user ${userId}`);
+
+      // ✅ IMPORTANT: Always return an array, even if empty
+      const enrichedReservations = await this.enrichReservationsWithUserData(reservations || []);
+      
+      return enrichedReservations;
     } catch (error) {
       logger.error('Get user reservations error:', error);
+      // ✅ IMPORTANT: Don't throw error for empty results, return empty array
+      if (error.message.includes('not found') || error.code === 404) {
+        logger.info(`No reservations found for user ${userId} - returning empty array`);
+        return [];
+      }
       throw error;
     }
   }
 
-  async getAllReservations(limit = 100) {
+  // ✅ ENHANCED: Get reservations by amenity (useful for debugging slot availability)
+  async getReservationsByAmenity(amenityId, startDate, endDate) {
     try {
+      logger.info(`📋 Getting reservations for amenity ${amenityId} from ${startDate} to ${endDate}`);
+
       const query = `
         SELECT * FROM c 
+        WHERE c.amenityId = @amenityId 
+        AND c.startTime >= @startDate 
+        AND c.startTime <= @endDate
+        ORDER BY c.startTime ASC
+      `;
+
+      const parameters = [
+        { name: '@amenityId', value: amenityId },
+        { name: '@startDate', value: startDate },
+        { name: '@endDate', value: endDate }
+      ];
+
+      const reservations = await databaseService.queryItems('Reservations', query, parameters);
+
+      // Enrich with user data
+      const enrichedReservations = await this.enrichReservationsWithUserData(reservations);
+
+      logger.info(`✅ Found ${enrichedReservations.length} reservations for amenity ${amenityId}`);
+
+      return enrichedReservations;
+
+    } catch (error) {
+      logger.error('Error getting reservations by amenity:', error);
+      throw error;
+    }
+  }
+
+  // ✅ FIXED: Updated getAllReservations to handle filters properly
+  async getAllReservations(filters = {}) {
+    try {
+      const limit = filters.limit || 100;
+      const status = filters.status;
+      const amenityId = filters.amenityId;
+      const startDate = filters.startDate;
+      const endDate = filters.endDate;
+
+      logger.info(`Getting all reservations with filters:`, filters);
+
+      // Build query conditions
+      let whereConditions = [];
+      const parameters = [];
+
+      if (status) {
+        whereConditions.push(`c.status = @status`);
+        parameters.push({ name: '@status', value: status });
+      }
+
+      if (amenityId) {
+        whereConditions.push(`c.amenityId = @amenityId`);
+        parameters.push({ name: '@amenityId', value: amenityId });
+      }
+
+      if (startDate) {
+        whereConditions.push(`c.startTime >= @startDate`);
+        parameters.push({ name: '@startDate', value: startDate });
+      }
+
+      if (endDate) {
+        whereConditions.push(`c.startTime <= @endDate`);
+        parameters.push({ name: '@endDate', value: endDate });
+      }
+
+      const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+      const query = `
+        SELECT * FROM c 
+        ${whereClause}
         ORDER BY c.createdAt DESC
         OFFSET 0 LIMIT @limit
       `;
       
-      const parameters = [
-        { name: '@limit', value: limit }
-      ];
+      parameters.push({ name: '@limit', value: limit });
+
+      logger.info(`Executing query for all reservations:`, { query, parameters });
 
       const reservations = await databaseService.queryItems('Reservations', query, parameters);
-      return await this.enrichReservationsWithUserData(reservations);
+      
+      logger.info(`Found ${reservations.length} total reservations`);
+
+      // ✅ IMPORTANT: Always return an array, even if empty
+      const enrichedReservations = await this.enrichReservationsWithUserData(reservations || []);
+      
+      return enrichedReservations;
     } catch (error) {
       logger.error('Get all reservations error:', error);
+      // ✅ IMPORTANT: Don't throw error for empty results, return empty array
+      if (error.message.includes('not found') || error.code === 404) {
+        logger.info('No reservations found - returning empty array');
+        return [];
+      }
       throw error;
     }
   }

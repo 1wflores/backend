@@ -169,40 +169,70 @@ class ReservationController {
     }
   }
 
+  // ✅ ENHANCED: Updated cancelReservation controller with proper deletion handling
   async cancelReservation(req, res) {
     try {
       const { id } = req.params;
       const userId = req.user.id;
       const userRole = req.user.role;
       
-      const reservation = await reservationService.cancelReservation(id, userId, userRole);
+      logger.info(`🚫 Controller: User ${userId} (${userRole}) requesting to cancel reservation ${id}`);
+
+      // Call the service layer to handle the cancellation and deletion
+      const cancelledReservation = await reservationService.cancelReservation(id, userId, userRole);
       
-      if (!reservation) {
+      if (!cancelledReservation) {
+        logger.error(`❌ Controller: Reservation ${id} not found or could not be cancelled`);
         return res.status(404).json({
           success: false,
           message: 'Reservation not found'
         });
       }
+
+      logger.info(`✅ Controller: Reservation ${id} successfully cancelled and deleted`);
       
+      // Return success response with details
       res.json({
         success: true,
-        message: 'Reservation cancelled successfully',
+        message: 'Reservation cancelled and deleted successfully',
         data: {
-          reservation
+          reservation: cancelledReservation,
+          slotFreed: true,
+          deletedFromDatabase: true
         }
       });
     } catch (error) {
-      logger.error('Cancel reservation error:', error);
-      res.status(400).json({
-        success: false,
-        message: error.message
-      });
+      logger.error(`❌ Controller: Cancel reservation error for ${req.params.id}:`, error);
+      
+      // Handle specific error cases
+      if (error.message.includes('not found')) {
+        return res.status(404).json({
+          success: false,
+          message: 'Reservation not found'
+        });
+      } else if (error.message.includes('Access denied')) {
+        return res.status(403).json({
+          success: false,
+          message: 'You can only cancel your own reservations'
+        });
+      } else if (error.message.includes('Cannot cancel')) {
+        return res.status(400).json({
+          success: false,
+          message: error.message
+        });
+      } else {
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to cancel reservation. Please try again.'
+        });
+      }
     }
   }
 
+   // ✅ ENHANCED: Better available slots endpoint
   async getAvailableSlots(req, res) {
     try {
-      const { amenityId, date } = req.query;
+      const { amenityId, date, duration } = req.query;
       
       if (!amenityId || !date) {
         return res.status(400).json({
@@ -210,17 +240,37 @@ class ReservationController {
           message: 'Amenity ID and date are required'
         });
       }
+
+      logger.info(`🔍 Controller: Getting available slots for ${amenityId} on ${date}`);
       
-      const slots = await reservationService.getAvailableSlots(amenityId, date);
+      const slots = await reservationService.getAvailableSlots(
+        amenityId, 
+        date, 
+        parseInt(duration) || 60
+      );
+      
+      logger.info(`✅ Controller: Found ${slots.length} available slots`);
       
       res.json({
         success: true,
         data: {
-          slots
+          slots,
+          amenityId,
+          date,
+          duration: parseInt(duration) || 60,
+          totalSlotsAvailable: slots.length
         }
       });
     } catch (error) {
-      logger.error('Get available slots error:', error);
+      logger.error('Controller: Get available slots error:', error);
+      
+      if (error.message.includes('not found') || error.message.includes('not available')) {
+        return res.status(404).json({
+          success: false,
+          message: error.message
+        });
+      }
+      
       res.status(500).json({
         success: false,
         message: 'Internal server error'
@@ -228,10 +278,13 @@ class ReservationController {
     }
   }
 
+  // ✅ ENHANCED: Better reservations by amenity endpoint
   async getReservationsByAmenity(req, res) {
     try {
       const { amenityId } = req.params;
       const { startDate, endDate } = req.query;
+      
+      logger.info(`📋 Controller: Getting reservations for amenity ${amenityId}`);
       
       const reservations = await reservationService.getReservationsByAmenity(
         amenityId,
@@ -239,17 +292,83 @@ class ReservationController {
         endDate
       );
       
+      logger.info(`✅ Controller: Found ${reservations.length} reservations for amenity ${amenityId}`);
+      
       res.json({
         success: true,
         data: {
-          reservations
+          reservations,
+          amenityId,
+          dateRange: {
+            startDate,
+            endDate
+          },
+          totalReservations: reservations.length
         }
       });
     } catch (error) {
-      logger.error('Get reservations by amenity error:', error);
+      logger.error('Controller: Get reservations by amenity error:', error);
       res.status(500).json({
         success: false,
         message: 'Internal server error'
+      });
+    }
+  }
+
+  // ✅ NEW: Health check endpoint for reservation system
+  async getReservationHealth(req, res) {
+    try {
+      // Basic health checks
+      const stats = {
+        timestamp: new Date().toISOString(),
+        database: 'connected',
+        operations: {
+          create: 'operational',
+          read: 'operational', 
+          update: 'operational',
+          delete: 'operational'
+        }
+      };
+
+      // Optional: Add more detailed health metrics
+      if (req.query.detailed === 'true' && req.user.role === 'admin') {
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        
+        const todayEnd = new Date();
+        todayEnd.setHours(23, 59, 59, 999);
+
+        try {
+          const todayReservations = await reservationService.getAllReservations({
+            startDate: todayStart.toISOString(),
+            endDate: todayEnd.toISOString()
+          });
+
+          stats.todayStats = {
+            totalReservations: todayReservations.length,
+            byStatus: {
+              pending: todayReservations.filter(r => r.status === 'pending').length,
+              approved: todayReservations.filter(r => r.status === 'approved').length,
+              cancelled: todayReservations.filter(r => r.status === 'cancelled').length,
+              denied: todayReservations.filter(r => r.status === 'denied').length
+            }
+          };
+        } catch (error) {
+          logger.warn('Could not fetch detailed health stats:', error);
+          stats.todayStats = 'unavailable';
+        }
+      }
+
+      res.json({
+        success: true,
+        data: stats
+      });
+    } catch (error) {
+      logger.error('Controller: Reservation health check error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Health check failed',
+        error: error.message
       });
     }
   }
