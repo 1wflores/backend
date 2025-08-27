@@ -28,16 +28,29 @@ class ReservationController {
     }
   }
 
+  // ✅ UPDATED: Enhanced getUserReservations with user role filtering
   async getUserReservations(req, res) {
     try {
       const userId = req.user.id;
-      const { status, startDate, endDate } = req.query;
+      const userRole = req.user.role;
+      const { status, startDate, endDate, limit } = req.query;
       
+      logger.info(`Getting reservations for user ${userId} (role: ${userRole})`, {
+        status,
+        startDate,
+        endDate,
+        limit
+      });
+
       const reservations = await reservationService.getUserReservations(userId, {
         status,
         startDate,
-        endDate
+        endDate,
+        limit: limit ? parseInt(limit) : 50,
+        userRole // ✅ NEW: Pass user role to service for filtering
       });
+      
+      logger.info(`Returning ${reservations.length} reservations for user ${userId}`);
       
       res.json({
         success: true,
@@ -54,17 +67,29 @@ class ReservationController {
     }
   }
 
+  // ✅ UPDATED: Enhanced getAllReservations (admin only)
   async getAllReservations(req, res) {
     try {
-      const { status, amenityId, startDate, endDate } = req.query;
+      const { status, amenityId, startDate, endDate, limit } = req.query;
       
+      logger.info(`Admin ${req.user.username} fetching all reservations`, {
+        status,
+        amenityId,
+        startDate,
+        endDate,
+        limit
+      });
+
       const reservations = await reservationService.getAllReservations({
         status,
         amenityId,
         startDate,
-        endDate
+        endDate,
+        limit: limit ? parseInt(limit) : 100
       });
       
+      logger.info(`Returning ${reservations.length} total reservations to admin`);
+
       res.json({
         success: true,
         data: {
@@ -115,7 +140,44 @@ class ReservationController {
     }
   }
 
-  // Add this to your backend controllers/reservationController.js
+  // ✅ UPDATED: Enhanced cancelReservation with proper user role handling
+  async cancelReservation(req, res) {
+    try {
+      const { id } = req.params;
+      const userId = req.user.id;
+      const userRole = req.user.role;
+
+      logger.info(`User ${userId} (role: ${userRole}) cancelling reservation ${id}`);
+
+      const result = await reservationService.cancelReservation(id, userId, userRole);
+
+      res.json({
+        success: true,
+        message: 'Reservation cancelled successfully',
+        data: result
+      });
+    } catch (error) {
+      logger.error('Cancel reservation error:', error);
+      
+      // Handle specific error cases
+      if (error.message === 'Reservation not found') {
+        return res.status(404).json({
+          success: false,
+          message: error.message
+        });
+      } else if (error.message.includes('Access denied') || error.message.includes('Cannot cancel')) {
+        return res.status(403).json({
+          success: false,
+          message: error.message
+        });
+      } else {
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to cancel reservation'
+        });
+      }
+    }
+  }
 
   async updateReservationStatus(req, res) {
     try {
@@ -124,112 +186,55 @@ class ReservationController {
       
       logger.info(`🎯 Controller: Updating reservation ${id} status to ${status}`, { denialReason });
       
-      // First, let's debug if the reservation exists at all
-      const debugReservation = await reservationService.debugReservationExists(id);
-      if (!debugReservation) {
-        logger.error(`❌ Controller: Reservation ${id} does not exist in database`);
-        return res.status(404).json({
+      // Validate status
+      const validStatuses = ['approved', 'denied', 'cancelled', 'completed'];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({
           success: false,
-          message: 'Reservation not found'
+          message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`
         });
       }
-      
-      logger.info(`📋 Controller: Found reservation ${id} with status: ${debugReservation.status}`);
-      
-      // Now try the normal update
-      const reservation = await reservationService.updateReservationStatus(
+
+      // Require denial reason for denied status
+      if (status === 'denied' && !denialReason) {
+        return res.status(400).json({
+          success: false,
+          message: 'Denial reason is required when denying a reservation'
+        });
+      }
+
+      const updatedReservation = await reservationService.updateReservationStatus(
         id, 
         status, 
         denialReason
       );
-      
-      if (!reservation) {
-        logger.error(`❌ Controller: Update returned null for reservation ${id}`);
+
+      if (!updatedReservation) {
         return res.status(404).json({
           success: false,
-          message: 'Reservation not found or could not be updated'
+          message: 'Reservation not found'
         });
       }
-      
-      logger.info(`✅ Controller: Reservation ${id} status updated successfully to ${status}`);
-      
+
+      logger.info(`✅ Successfully updated reservation ${id} status to ${status}`);
+
       res.json({
         success: true,
         message: `Reservation ${status} successfully`,
         data: {
-          reservation
+          reservation: updatedReservation
         }
       });
     } catch (error) {
-      logger.error('❌ Controller: Update reservation status error:', error);
-      res.status(400).json({
+      logger.error('Update reservation status error:', error);
+      res.status(500).json({
         success: false,
-        message: error.message
+        message: error.message || 'Failed to update reservation status'
       });
     }
   }
 
-  // ✅ ENHANCED: Updated cancelReservation controller with proper deletion handling
-  async cancelReservation(req, res) {
-    try {
-      const { id } = req.params;
-      const userId = req.user.id;
-      const userRole = req.user.role;
-      
-      logger.info(`🚫 Controller: User ${userId} (${userRole}) requesting to cancel reservation ${id}`);
-
-      // Call the service layer to handle the cancellation and deletion
-      const cancelledReservation = await reservationService.cancelReservation(id, userId, userRole);
-      
-      if (!cancelledReservation) {
-        logger.error(`❌ Controller: Reservation ${id} not found or could not be cancelled`);
-        return res.status(404).json({
-          success: false,
-          message: 'Reservation not found'
-        });
-      }
-
-      logger.info(`✅ Controller: Reservation ${id} successfully cancelled and deleted`);
-      
-      // Return success response with details
-      res.json({
-        success: true,
-        message: 'Reservation cancelled and deleted successfully',
-        data: {
-          reservation: cancelledReservation,
-          slotFreed: true,
-          deletedFromDatabase: true
-        }
-      });
-    } catch (error) {
-      logger.error(`❌ Controller: Cancel reservation error for ${req.params.id}:`, error);
-      
-      // Handle specific error cases
-      if (error.message.includes('not found')) {
-        return res.status(404).json({
-          success: false,
-          message: 'Reservation not found'
-        });
-      } else if (error.message.includes('Access denied')) {
-        return res.status(403).json({
-          success: false,
-          message: 'You can only cancel your own reservations'
-        });
-      } else if (error.message.includes('Cannot cancel')) {
-        return res.status(400).json({
-          success: false,
-          message: error.message
-        });
-      } else {
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to cancel reservation. Please try again.'
-        });
-      }
-    }
-  }
-
-   // ✅ ENHANCED: Better available slots endpoint
+  // ✅ UPDATED: Enhanced getAvailableSlots
   async getAvailableSlots(req, res) {
     try {
       const { amenityId, date, duration } = req.query;
@@ -241,73 +246,73 @@ class ReservationController {
         });
       }
 
-      logger.info(`🔍 Controller: Getting available slots for ${amenityId} on ${date}`);
-      
-      const slots = await reservationService.getAvailableSlots(
-        amenityId, 
-        date, 
-        parseInt(duration) || 60
-      );
-      
-      logger.info(`✅ Controller: Found ${slots.length} available slots`);
-      
+      // Validate date format
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Date must be in YYYY-MM-DD format'
+        });
+      }
+
+      const durationMinutes = duration ? parseInt(duration) : 60;
+
+      logger.info(`Getting available slots for amenity ${amenityId} on ${date} (${durationMinutes}min)`);
+
+      const slots = await reservationService.getAvailableSlots(amenityId, date, durationMinutes);
+
       res.json({
         success: true,
         data: {
           slots,
           amenityId,
           date,
-          duration: parseInt(duration) || 60,
-          totalSlotsAvailable: slots.length
+          durationMinutes
         }
       });
     } catch (error) {
-      logger.error('Controller: Get available slots error:', error);
-      
-      if (error.message.includes('not found') || error.message.includes('not available')) {
-        return res.status(404).json({
-          success: false,
-          message: error.message
-        });
-      }
-      
+      logger.error('Get available slots error:', error);
       res.status(500).json({
         success: false,
-        message: 'Internal server error'
+        message: error.message || 'Failed to get available slots'
       });
     }
   }
 
-  // ✅ ENHANCED: Better reservations by amenity endpoint
+  // ✅ UPDATED: Enhanced getReservationsByAmenity (admin only)
   async getReservationsByAmenity(req, res) {
     try {
       const { amenityId } = req.params;
       const { startDate, endDate } = req.query;
-      
-      logger.info(`📋 Controller: Getting reservations for amenity ${amenityId}`);
-      
-      const reservations = await reservationService.getReservationsByAmenity(
-        amenityId,
+
+      logger.info(`Admin ${req.user.username} getting reservations for amenity ${amenityId}`, {
         startDate,
         endDate
+      });
+
+      // Default to current month if no dates provided
+      const now = new Date();
+      const defaultStartDate = startDate || new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+      const defaultEndDate = endDate || new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString();
+
+      const reservations = await reservationService.getReservationsByAmenity(
+        amenityId,
+        defaultStartDate,
+        defaultEndDate
       );
-      
-      logger.info(`✅ Controller: Found ${reservations.length} reservations for amenity ${amenityId}`);
-      
+
       res.json({
         success: true,
         data: {
           reservations,
           amenityId,
           dateRange: {
-            startDate,
-            endDate
-          },
-          totalReservations: reservations.length
+            startDate: defaultStartDate,
+            endDate: defaultEndDate
+          }
         }
       });
     } catch (error) {
-      logger.error('Controller: Get reservations by amenity error:', error);
+      logger.error('Get reservations by amenity error:', error);
       res.status(500).json({
         success: false,
         message: 'Internal server error'
@@ -318,19 +323,13 @@ class ReservationController {
   // ✅ NEW: Health check endpoint for reservation system
   async getReservationHealth(req, res) {
     try {
-      // Basic health checks
       const stats = {
+        status: 'healthy',
         timestamp: new Date().toISOString(),
-        database: 'connected',
-        operations: {
-          create: 'operational',
-          read: 'operational', 
-          update: 'operational',
-          delete: 'operational'
-        }
+        service: 'reservation-system'
       };
 
-      // Optional: Add more detailed health metrics
+      // Add detailed stats for admin users
       if (req.query.detailed === 'true' && req.user.role === 'admin') {
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
