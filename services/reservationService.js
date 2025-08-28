@@ -375,6 +375,115 @@ class ReservationService {
     }
   }
 
+  // ✅ Enrich reservations with amenity data (for getUserReservations)
+  async enrichReservationsWithAmenityData(reservations) {
+    if (!reservations || reservations.length === 0) {
+      return [];
+    }
+
+    try {
+      // Get unique amenity IDs
+      const amenityIds = [...new Set(reservations.map(r => r.amenityId))];
+      
+      // Fetch all amenities
+      const amenities = {};
+      for (const amenityId of amenityIds) {
+        try {
+          const amenity = await amenityService.getAmenityById(amenityId);
+          if (amenity) {
+            amenities[amenityId] = amenity;
+          }
+        } catch (error) {
+          logger.warn(`Could not fetch amenity ${amenityId}:`, error.message);
+        }
+      }
+
+      // Enrich reservations
+      return reservations.map(reservation => {
+        const amenity = amenities[reservation.amenityId];
+        if (amenity) {
+          return {
+            ...reservation,
+            amenityName: amenity.name,
+            amenityType: amenity.type,
+            amenityDescription: amenity.description,
+            requiresApproval: amenity.requiresApproval || 
+                             (amenity.autoApprovalRules ? true : false)
+          };
+        }
+        return reservation;
+      });
+    } catch (error) {
+      logger.error('Enrich reservations with amenity data error:', error);
+      return reservations;
+    }
+  }
+
+  // ✅ Enrich reservations with full data (both user and amenity)
+  async enrichReservationsWithFullData(reservations) {
+    if (!reservations || reservations.length === 0) {
+      return [];
+    }
+
+    try {
+      // Get unique IDs
+      const userIds = [...new Set(reservations.map(r => r.userId))];
+      const amenityIds = [...new Set(reservations.map(r => r.amenityId))];
+      
+      // Fetch all users
+      const users = {};
+      for (const userId of userIds) {
+        try {
+          const user = await authService.getUserById(userId);
+          if (user) {
+            users[userId] = user;
+          }
+        } catch (error) {
+          logger.warn(`Could not fetch user ${userId}:`, error.message);
+        }
+      }
+
+      // Fetch all amenities
+      const amenities = {};
+      for (const amenityId of amenityIds) {
+        try {
+          const amenity = await amenityService.getAmenityById(amenityId);
+          if (amenity) {
+            amenities[amenityId] = amenity;
+          }
+        } catch (error) {
+          logger.warn(`Could not fetch amenity ${amenityId}:`, error.message);
+        }
+      }
+
+      // Enrich reservations
+      return reservations.map(reservation => {
+        const user = users[reservation.userId];
+        const amenity = amenities[reservation.amenityId];
+        
+        return {
+          ...reservation,
+          // User data
+          username: user?.username || 'Unknown',
+          userEmail: user?.email || null,
+          userRole: user?.role || 'resident',
+          // Amenity data
+          amenityName: amenity?.name || 'Unknown',
+          amenityType: amenity?.type || null,
+          amenityDescription: amenity?.description || null,
+          requiresApproval: amenity?.requiresApproval || 
+                           (amenity?.autoApprovalRules ? true : false),
+          // Lounge-specific data (will be included if present in reservation)
+          visitorCount: reservation.visitorCount || null,
+          willUseGrill: reservation.willUseGrill || null
+        };
+      });
+    } catch (error) {
+      logger.error('Enrich reservations with full data error:', error);
+      return reservations;
+    }
+  }
+
   // ✅ Get system health
   async getSystemHealth() {
     try {
@@ -458,7 +567,10 @@ class ReservationService {
       
       const reservations = await databaseService.queryItems(this.collectionName, query, parameters);
       
-      return reservations || [];
+      // Enrich with full data
+      const enrichedReservations = await this.enrichReservationsWithFullData(reservations || []);
+      
+      return enrichedReservations;
     } catch (error) {
       logger.error('Search reservations error:', error);
       return [];
