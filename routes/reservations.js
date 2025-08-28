@@ -1,4 +1,4 @@
-// routes/reservations.js - UPDATED WITH HEALTH CHECK AND BETTER VALIDATION
+// routes/reservations.js - COMPLETE FILE
 
 const express = require('express');
 const { body, param, query } = require('express-validator');
@@ -8,119 +8,239 @@ const { validate } = require('../middleware/validation');
 
 const router = express.Router();
 
-// Enhanced validation rules
+// ✅ VALIDATION RULES WITH LOUNGE SUPPORT
+
+// Create reservation validation
 const createReservationValidation = [
-  body('amenityId').isString().notEmpty().withMessage('Amenity ID is required'),
-  body('startTime').isISO8601().withMessage('Valid start time is required'),
-  body('endTime').isISO8601().withMessage('Valid end time is required'),
-  body('notes').optional().isString().isLength({ max: 500 }).withMessage('Notes must be less than 500 characters'),
+  body('amenityId')
+    .isString()
+    .notEmpty()
+    .withMessage('Amenity ID is required'),
+  body('startTime')
+    .isISO8601()
+    .withMessage('Valid start time is required'),
+  body('endTime')
+    .isISO8601()
+    .withMessage('Valid end time is required'),
+  body('notes')
+    .optional()
+    .isString()
+    .isLength({ max: 500 })
+    .withMessage('Notes must be less than 500 characters'),
+  body('specialRequests')
+    .optional()
+    .isString()
+    .isLength({ max: 500 })
+    .withMessage('Special requests must be less than 500 characters'),
+  body('visitorCount')
+    .optional()
+    .isInt({ min: 1, max: 100 })
+    .withMessage('Visitor count must be between 1 and 100'),
+  body('willUseGrill')
+    .optional()
+    .isBoolean()
+    .withMessage('Grill usage must be a boolean'),
 ];
 
+// Update reservation validation
+const updateReservationValidation = [
+  param('id')
+    .isString()
+    .notEmpty()
+    .withMessage('Reservation ID is required'),
+  body('startTime')
+    .isISO8601()
+    .withMessage('Valid start time is required'),
+  body('endTime')
+    .isISO8601()
+    .withMessage('Valid end time is required'),
+  body('notes')
+    .optional()
+    .isString()
+    .isLength({ max: 500 })
+    .withMessage('Notes must be less than 500 characters'),
+  body('specialRequests')
+    .optional()
+    .isString()
+    .isLength({ max: 500 })
+    .withMessage('Special requests must be less than 500 characters'),
+  body('amenityId')
+    .optional()
+    .isString()
+    .withMessage('Amenity ID must be a string'),
+  body('visitorCount')
+    .optional()
+    .isInt({ min: 1, max: 100 })
+    .withMessage('Visitor count must be between 1 and 100'),
+  body('willUseGrill')
+    .optional()
+    .isBoolean()
+    .withMessage('Grill usage must be a boolean'),
+];
+
+// Update status validation
 const updateStatusValidation = [
-  param('id').isString().notEmpty().withMessage('Reservation ID is required'),
-  body('status').isIn(['approved', 'denied', 'cancelled']).withMessage('Valid status is required'),
-  body('denialReason').optional().isString().isLength({ max: 500 }).withMessage('Denial reason must be less than 500 characters'),
+  param('id')
+    .isString()
+    .notEmpty()
+    .withMessage('Reservation ID is required'),
+  body('status')
+    .isIn(['approved', 'denied', 'cancelled'])
+    .withMessage('Valid status is required (approved, denied, or cancelled)'),
+  body('denialReason')
+    .optional()
+    .isString()
+    .isLength({ max: 500 })
+    .withMessage('Denial reason must be less than 500 characters'),
 ];
 
+// Reservation ID validation
 const reservationIdValidation = [
-  param('id').isString().notEmpty().withMessage('Reservation ID is required'),
+  param('id')
+    .isString()
+    .notEmpty()
+    .withMessage('Reservation ID is required'),
 ];
 
+// Available slots validation
 const availableSlotsValidation = [
-  query('amenityId').isString().notEmpty().withMessage('Amenity ID is required'),
-  query('date').matches(/^\d{4}-\d{2}-\d{2}$/).withMessage('Date must be in YYYY-MM-DD format'),
-  query('duration').optional().isInt({ min: 30, max: 480 }).withMessage('Duration must be between 30 and 480 minutes'),
+  query('amenityId')
+    .isString()
+    .notEmpty()
+    .withMessage('Amenity ID is required'),
+  query('date')
+    .matches(/^\d{4}-\d{2}-\d{2}$/)
+    .withMessage('Date must be in YYYY-MM-DD format'),
+  query('duration')
+    .optional()
+    .isInt({ min: 30, max: 480 })
+    .withMessage('Duration must be between 30 and 480 minutes'),
 ];
 
+// Amenity reservations validation
 const amenityReservationsValidation = [
-  param('amenityId').isString().notEmpty().withMessage('Amenity ID is required'),
-  query('startDate').optional().isISO8601().withMessage('Start date must be valid ISO date'),
-  query('endDate').optional().isISO8601().withMessage('End date must be valid ISO date'),
+  param('amenityId')
+    .isString()
+    .notEmpty()
+    .withMessage('Amenity ID is required'),
+  query('startDate')
+    .optional()
+    .isISO8601()
+    .withMessage('Start date must be valid ISO date'),
+  query('endDate')
+    .optional()
+    .isISO8601()
+    .withMessage('End date must be valid ISO date'),
 ];
+
+// Get reservations query validation
+const getReservationsValidation = [
+  query('status')
+    .optional()
+    .isIn(['pending', 'approved', 'denied', 'cancelled', 'completed'])
+    .withMessage('Invalid status filter'),
+  query('amenityId')
+    .optional()
+    .isString()
+    .withMessage('Amenity ID must be a string'),
+  query('userId')
+    .optional()
+    .isString()
+    .withMessage('User ID must be a string'),
+  query('startDate')
+    .optional()
+    .isISO8601()
+    .withMessage('Start date must be valid ISO date'),
+  query('endDate')
+    .optional()
+    .isISO8601()
+    .withMessage('End date must be valid ISO date'),
+  query('upcoming')
+    .optional()
+    .isBoolean()
+    .withMessage('Upcoming must be a boolean'),
+];
+
+// ✅ ROUTES
 
 // All routes require authentication
 router.use(authenticateToken);
 
-// ✅ NEW: Health check endpoint (accessible to all authenticated users)
+// ============================================
+// PUBLIC ROUTES (Authenticated users)
+// ============================================
+
+// Health check endpoint
 router.get('/health', reservationController.getReservationHealth);
 
-// Public routes (authenticated users)
-router.post('/', validate(createReservationValidation), reservationController.createReservation);
-router.get('/user', reservationController.getUserReservations);
-router.get('/available-slots', validate(availableSlotsValidation), reservationController.getAvailableSlots);
-router.get('/:id', validate(reservationIdValidation), reservationController.getReservationById);
+// Create new reservation
+router.post(
+  '/', 
+  validate(createReservationValidation), 
+  reservationController.createReservation
+);
 
-// ✅ ENHANCED: Cancel reservation route with better error handling
-router.delete('/:id', validate(reservationIdValidation), reservationController.cancelReservation);
+// Get user's reservations
+router.get(
+  '/user', 
+  validate(getReservationsValidation),
+  reservationController.getUserReservations
+);
 
-// Admin routes
-router.get('/', requireAdmin, reservationController.getAllReservations);
+// Get available slots for an amenity
+router.get(
+  '/available-slots', 
+  validate(availableSlotsValidation), 
+  reservationController.getAvailableSlots
+);
 
-// ✅ FIXED: Both PATCH and PUT methods for status update (admin only)
-router.patch('/:id/status', requireAdmin, validate(updateStatusValidation), reservationController.updateReservationStatus);
-router.put('/:id/status', requireAdmin, validate(updateStatusValidation), reservationController.updateReservationStatus);
+// Get specific reservation by ID
+router.get(
+  '/:id', 
+  validate(reservationIdValidation), 
+  reservationController.getReservationById
+);
 
-// ✅ ENHANCED: Get reservations by amenity with better validation
-router.get('/amenity/:amenityId', requireAdmin, validate(amenityReservationsValidation), reservationController.getReservationsByAmenity);
+// Update reservation (edit date, time, notes, lounge fields)
+router.put(
+  '/:id', 
+  validate(updateReservationValidation), 
+  reservationController.updateReservation
+);
 
-// ✅ NEW: Bulk operations (admin only)
-router.post('/bulk-cancel', requireAdmin, [
-  body('reservationIds').isArray({ min: 1 }).withMessage('At least one reservation ID is required'),
-  body('reservationIds.*').isString().withMessage('Each reservation ID must be a string'),
-  body('reason').optional().isString().isLength({ max: 500 }).withMessage('Reason must be less than 500 characters')
-], async (req, res) => {
-  try {
-    const { reservationIds, reason } = req.body;
-    const userId = req.user.id;
-    const userRole = req.user.role;
+// Cancel reservation (delete)
+router.delete(
+  '/:id', 
+  validate(reservationIdValidation), 
+  reservationController.cancelReservation
+);
 
-    console.log(`🚫 Bulk cancelling ${reservationIds.length} reservations by admin ${userId}`);
+// ============================================
+// ADMIN ROUTES
+// ============================================
 
-    const results = [];
-    const errors = [];
+// Get all reservations (admin only)
+router.get(
+  '/', 
+  requireAdmin,
+  validate(getReservationsValidation),
+  reservationController.getAllReservations
+);
 
-    for (const reservationId of reservationIds) {
-      try {
-        const cancelled = await reservationService.cancelReservation(reservationId, userId, userRole);
-        results.push({
-          reservationId,
-          success: true,
-          reservation: cancelled
-        });
-      } catch (error) {
-        console.error(`❌ Failed to cancel reservation ${reservationId}:`, error);
-        errors.push({
-          reservationId,
-          success: false,
-          error: error.message
-        });
-      }
-    }
+// Update reservation status (admin only - approve/deny)
+router.patch(
+  '/:id/status', 
+  requireAdmin,
+  validate(updateStatusValidation), 
+  reservationController.updateReservationStatus
+);
 
-    console.log(`✅ Bulk cancellation completed: ${results.length} successful, ${errors.length} failed`);
-
-    res.json({
-      success: true,
-      message: `Bulk cancellation completed: ${results.length} successful, ${errors.length} failed`,
-      data: {
-        successful: results,
-        failed: errors,
-        summary: {
-          total: reservationIds.length,
-          successful: results.length,
-          failed: errors.length
-        }
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Bulk cancellation error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Bulk cancellation failed',
-      error: error.message
-    });
-  }
-});
+// Get reservations by amenity (admin only)
+router.get(
+  '/amenity/:amenityId', 
+  requireAdmin,
+  validate(amenityReservationsValidation), 
+  reservationController.getReservationsByAmenity
+);
 
 module.exports = router;
