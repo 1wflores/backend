@@ -1,4 +1,4 @@
-// services/reservationService.js - COMPLETE BACKEND SERVICE FILE
+// services/reservationService.js - FIXED BACKEND SERVICE FILE
 
 const databaseService = require('./databaseService');
 const authService = require('./authService');
@@ -88,12 +88,13 @@ class ReservationService {
     }
   }
 
-  // ✅ Get user reservations
+  // ✅ FIXED: Get user reservations - using queryItems instead of query
   async getUserReservations(userId) {
     try {
-      const reservations = await databaseService.query(this.collectionName, {
-        userId: userId
-      });
+      const query = 'SELECT * FROM c WHERE c.userId = @userId ORDER BY c.startTime DESC';
+      const parameters = [{ name: '@userId', value: userId }];
+      
+      const reservations = await databaseService.queryItems(this.collectionName, query, parameters);
       
       return reservations || [];
     } catch (error) {
@@ -113,23 +114,26 @@ class ReservationService {
     }
   }
 
-  // ✅ Get reservations by amenity
+  // ✅ FIXED: Get reservations by amenity - using queryItems instead of query
   async getReservationsByAmenity(amenityId, startDate, endDate) {
     try {
-      let reservations = await databaseService.query(this.collectionName, {
-        amenityId: amenityId
-      });
-
-      // Filter by date range if provided
-      if (startDate || endDate) {
-        const start = startDate ? new Date(startDate) : new Date('2000-01-01');
-        const end = endDate ? new Date(endDate) : new Date('2100-01-01');
-        
-        reservations = reservations.filter(r => {
-          const resStart = new Date(r.startTime);
-          return resStart >= start && resStart <= end;
-        });
+      let query = 'SELECT * FROM c WHERE c.amenityId = @amenityId';
+      const parameters = [{ name: '@amenityId', value: amenityId }];
+      
+      // Add date range filters if provided
+      if (startDate) {
+        query += ' AND c.startTime >= @startDate';
+        parameters.push({ name: '@startDate', value: startDate });
       }
+      
+      if (endDate) {
+        query += ' AND c.startTime <= @endDate';
+        parameters.push({ name: '@endDate', value: endDate });
+      }
+      
+      query += ' ORDER BY c.startTime DESC';
+      
+      const reservations = await databaseService.queryItems(this.collectionName, query, parameters);
 
       return reservations || [];
     } catch (error) {
@@ -178,17 +182,21 @@ class ReservationService {
     }
   }
 
-  // ✅ Check time conflict
+  // ✅ FIXED: Check time conflict - using queryItems instead of query
   async checkTimeConflict(amenityId, startTime, endTime, excludeReservationId = null) {
     try {
       const start = new Date(startTime);
       const end = new Date(endTime);
       
       // Get all active reservations for this amenity
-      const reservations = await databaseService.query(this.collectionName, {
-        amenityId: amenityId,
-        status: { $in: ['pending', 'approved', 'confirmed'] }
-      });
+      const query = `
+        SELECT * FROM c 
+        WHERE c.amenityId = @amenityId 
+        AND c.status IN ('pending', 'approved', 'confirmed')
+      `;
+      const parameters = [{ name: '@amenityId', value: amenityId }];
+      
+      const reservations = await databaseService.queryItems(this.collectionName, query, parameters);
 
       // Check for conflicts
       for (const reservation of reservations) {
@@ -218,7 +226,7 @@ class ReservationService {
     }
   }
 
-  // ✅ Get available slots
+  // ✅ FIXED: Get available slots - using queryItems instead of query
   async getAvailableSlots(amenityId, date, durationMinutes = 60) {
     try {
       // Get amenity details
@@ -240,16 +248,26 @@ class ReservationService {
       const endOfDay = new Date(dateObj);
       endOfDay.setHours(23, 59, 59, 999);
 
-      const existingReservations = await databaseService.query(this.collectionName, {
-        amenityId: amenityId,
-        status: { $in: ['pending', 'approved', 'confirmed'] }
-      });
+      // FIXED: Using queryItems with proper SQL query instead of query method
+      const query = `
+        SELECT * FROM c 
+        WHERE c.amenityId = @amenityId 
+        AND c.startTime >= @startOfDay 
+        AND c.startTime <= @endOfDay 
+        AND c.status IN ('pending', 'approved', 'confirmed')
+      `;
+      
+      const parameters = [
+        { name: '@amenityId', value: amenityId },
+        { name: '@startOfDay', value: startOfDay.toISOString() },
+        { name: '@endOfDay', value: endOfDay.toISOString() }
+      ];
 
-      // Filter reservations for this specific date
-      const dayReservations = existingReservations.filter(r => {
-        const resStart = new Date(r.startTime);
-        return resStart >= startOfDay && resStart <= endOfDay;
-      });
+      const existingReservations = await databaseService.queryItems(
+        this.collectionName, 
+        query, 
+        parameters
+      );
 
       // Generate all possible slots
       const slots = [];
@@ -267,14 +285,13 @@ class ReservationService {
 
         // Only add slot if it ends before closing time
         if (slotEnd <= closeDateTime) {
-          // Check if slot is available (not conflicting with existing reservations)
+          // Check if this slot conflicts with any existing reservation
           let isAvailable = true;
           
-          for (const reservation of dayReservations) {
+          for (const reservation of existingReservations) {
             const resStart = new Date(reservation.startTime);
             const resEnd = new Date(reservation.endTime);
             
-            // Check for overlap
             if (
               (slotStart >= resStart && slotStart < resEnd) ||
               (slotEnd > resStart && slotEnd <= resEnd) ||
@@ -285,23 +302,15 @@ class ReservationService {
             }
           }
 
-          // Only add available slots
-          if (isAvailable) {
-            // Check if slot is in the future
-            const now = new Date();
-            if (slotStart > now) {
-              slots.push({
-                startTime: slotStart.toISOString(),
-                endTime: slotEnd.toISOString(),
-                label: `${this.formatTime(slotStart)} - ${this.formatTime(slotEnd)}`,
-                available: true
-              });
-            }
-          }
+          slots.push({
+            startTime: slotStart.toISOString(),
+            endTime: slotEnd.toISOString(),
+            available: isAvailable
+          });
         }
 
-        // Move to next slot (30-minute intervals)
-        slotDate.setMinutes(slotDate.getMinutes() + 30);
+        // Move to next slot
+        slotDate.setMinutes(slotDate.getMinutes() + 30); // 30-minute intervals
       }
 
       return slots;
@@ -311,267 +320,148 @@ class ReservationService {
     }
   }
 
-  // ✅ Helper: Format time for display
-  formatTime(date) {
-    const hours = date.getHours();
-    const minutes = date.getMinutes();
-    const ampm = hours >= 12 ? 'PM' : 'AM';
-    const displayHours = hours % 12 || 12;
-    const displayMinutes = minutes.toString().padStart(2, '0');
-    return `${displayHours}:${displayMinutes} ${ampm}`;
-  }
-
   // ✅ Enrich reservation with user data
   async enrichReservationWithUserData(reservation) {
-    if (!reservation) return null;
-    
     try {
+      if (!reservation) return null;
+      
       const user = await authService.getUserById(reservation.userId);
-      
-      if (user) {
-        return {
-          ...reservation,
-          username: user.username,
-          userEmail: user.email || null,
-          userRole: user.role
-        };
-      }
-      
-      return reservation;
-    } catch (error) {
-      logger.warn(`Could not enrich reservation ${reservation.id} with user data:`, error.message);
-      return reservation;
-    }
-  }
-
-  // ✅ Enrich reservations with user data (batch)
-  async enrichReservationsWithUserData(reservations) {
-    if (!reservations || reservations.length === 0) {
-      return [];
-    }
-
-    try {
-      // Get unique user IDs
-      const userIds = [...new Set(reservations.map(r => r.userId))];
-      
-      // Fetch all users
-      const users = {};
-      for (const userId of userIds) {
-        try {
-          const user = await authService.getUserById(userId);
-          if (user) {
-            users[userId] = user;
-          }
-        } catch (error) {
-          logger.warn(`Could not fetch user ${userId}:`, error.message);
-        }
-      }
-
-      // Enrich reservations
-      return reservations.map(reservation => {
-        const user = users[reservation.userId];
-        if (user) {
-          return {
-            ...reservation,
-            username: user.username,
-            userEmail: user.email || null,
-            userRole: user.role
-          };
-        }
-        return reservation;
-      });
-    } catch (error) {
-      logger.error('Enrich reservations with user data error:', error);
-      return reservations;
-    }
-  }
-
-  // ✅ Enrich reservations with amenity data
-  async enrichReservationsWithAmenityData(reservations) {
-    if (!reservations || reservations.length === 0) {
-      return [];
-    }
-
-    try {
-      // Get unique amenity IDs
-      const amenityIds = [...new Set(reservations.map(r => r.amenityId))];
-      
-      // Fetch all amenities
-      const amenities = {};
-      for (const amenityId of amenityIds) {
-        try {
-          const amenity = await amenityService.getAmenityById(amenityId);
-          if (amenity) {
-            amenities[amenityId] = amenity;
-          }
-        } catch (error) {
-          logger.warn(`Could not fetch amenity ${amenityId}:`, error.message);
-        }
-      }
-
-      // Enrich reservations
-      return reservations.map(reservation => {
-        const amenity = amenities[reservation.amenityId];
-        if (amenity) {
-          return {
-            ...reservation,
-            amenityName: amenity.name,
-            amenityType: amenity.type,
-            amenityDescription: amenity.description,
-            requiresApproval: amenity.requiresApproval || 
-                             (amenity.autoApprovalRules ? true : false)
-          };
-        }
-        return reservation;
-      });
-    } catch (error) {
-      logger.error('Enrich reservations with amenity data error:', error);
-      return reservations;
-    }
-  }
-
-  // ✅ Enrich reservation with full data
-  async enrichReservationWithFullData(reservation) {
-    if (!reservation) return null;
-    
-    try {
-      // Get user data
-      const user = await authService.getUserById(reservation.userId);
-      
-      // Get amenity data
-      const amenity = await amenityService.getAmenityById(reservation.amenityId);
       
       return {
         ...reservation,
-        // User data
-        username: user?.username || 'Unknown',
-        userEmail: user?.email || null,
-        userRole: user?.role || 'resident',
-        // Amenity data
-        amenityName: amenity?.name || 'Unknown',
-        amenityType: amenity?.type || null,
-        amenityDescription: amenity?.description || null,
-        requiresApproval: amenity?.requiresApproval || 
-                         (amenity?.autoApprovalRules ? true : false),
-        // Lounge-specific data (will be included if present in reservation)
-        visitorCount: reservation.visitorCount || null,
-        willUseGrill: reservation.willUseGrill || null
+        user: user ? authService.sanitizeUser(user) : null
       };
     } catch (error) {
-      logger.warn(`Could not enrich reservation ${reservation.id} with full data:`, error.message);
+      logger.error('Enrich reservation error:', error);
       return reservation;
     }
   }
 
-  // ✅ Enrich reservations with full data (batch)
-  async enrichReservationsWithFullData(reservations) {
-    if (!reservations || reservations.length === 0) {
-      return [];
-    }
-
+  // ✅ Enrich multiple reservations with user data
+  async enrichReservationsWithUserData(reservations) {
     try {
-      // Get unique IDs
-      const userIds = [...new Set(reservations.map(r => r.userId))];
-      const amenityIds = [...new Set(reservations.map(r => r.amenityId))];
+      const enrichedReservations = [];
       
-      // Fetch all users
-      const users = {};
-      for (const userId of userIds) {
-        try {
-          const user = await authService.getUserById(userId);
-          if (user) {
-            users[userId] = user;
-          }
-        } catch (error) {
-          logger.warn(`Could not fetch user ${userId}:`, error.message);
-        }
+      for (const reservation of reservations) {
+        const enriched = await this.enrichReservationWithUserData(reservation);
+        enrichedReservations.push(enriched);
       }
-
-      // Fetch all amenities
-      const amenities = {};
-      for (const amenityId of amenityIds) {
-        try {
-          const amenity = await amenityService.getAmenityById(amenityId);
-          if (amenity) {
-            amenities[amenityId] = amenity;
-          }
-        } catch (error) {
-          logger.warn(`Could not fetch amenity ${amenityId}:`, error.message);
-        }
-      }
-
-      // Enrich reservations
-      return reservations.map(reservation => {
-        const user = users[reservation.userId];
-        const amenity = amenities[reservation.amenityId];
-        
-        return {
-          ...reservation,
-          // User data
-          username: user?.username || 'Unknown',
-          userEmail: user?.email || null,
-          userRole: user?.role || 'resident',
-          // Amenity data
-          amenityName: amenity?.name || 'Unknown',
-          amenityType: amenity?.type || null,
-          amenityDescription: amenity?.description || null,
-          requiresApproval: amenity?.requiresApproval || 
-                           (amenity?.autoApprovalRules ? true : false),
-          // Lounge-specific data (will be included if present in reservation)
-          visitorCount: reservation.visitorCount || null,
-          willUseGrill: reservation.willUseGrill || null
-        };
-      });
+      
+      return enrichedReservations;
     } catch (error) {
-      logger.error('Enrich reservations with full data error:', error);
+      logger.error('Enrich reservations error:', error);
       return reservations;
+    }
+  }
+
+  // ✅ Enrich reservation with full data (user + amenity)
+  async enrichReservationWithFullData(reservation) {
+    try {
+      if (!reservation) return null;
+      
+      const [user, amenity] = await Promise.all([
+        authService.getUserById(reservation.userId),
+        amenityService.getAmenityById(reservation.amenityId)
+      ]);
+      
+      return {
+        ...reservation,
+        user: user ? authService.sanitizeUser(user) : null,
+        amenity: amenity || null
+      };
+    } catch (error) {
+      logger.error('Enrich reservation with full data error:', error);
+      return reservation;
     }
   }
 
   // ✅ Get system health
   async getSystemHealth() {
     try {
-      const now = new Date();
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
-
-      // Get all reservations
-      const allReservations = await this.getAllReservations();
-      
-      // Calculate stats
-      const todayReservations = allReservations.filter(r => {
-        const start = new Date(r.startTime);
-        return start >= today && start < tomorrow;
-      });
-
-      const upcomingReservations = allReservations.filter(r => {
-        return new Date(r.startTime) > now;
-      });
-
-      const pendingReservations = allReservations.filter(r => {
-        return r.status === 'pending';
-      });
+      const [totalReservations, pendingCount, approvedCount] = await Promise.all([
+        this.getAllReservations().then(r => r.length),
+        this.getReservationsByStatus('pending').then(r => r.length),
+        this.getReservationsByStatus('approved').then(r => r.length)
+      ]);
 
       return {
         status: 'healthy',
-        timestamp: now.toISOString(),
         stats: {
-          total: allReservations.length,
-          today: todayReservations.length,
-          upcoming: upcomingReservations.length,
-          pending: pendingReservations.length
-        }
+          total: totalReservations,
+          pending: pendingCount,
+          approved: approvedCount
+        },
+        timestamp: new Date().toISOString()
       };
     } catch (error) {
       logger.error('Get system health error:', error);
       return {
-        status: 'unhealthy',
-        timestamp: new Date().toISOString(),
-        error: error.message
+        status: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString()
       };
+    }
+  }
+
+  // ✅ FIXED: Get reservations by status - using queryItems
+  async getReservationsByStatus(status) {
+    try {
+      const query = 'SELECT * FROM c WHERE c.status = @status ORDER BY c.createdAt DESC';
+      const parameters = [{ name: '@status', value: status }];
+      
+      const reservations = await databaseService.queryItems(this.collectionName, query, parameters);
+      
+      return reservations || [];
+    } catch (error) {
+      logger.error('Get reservations by status error:', error);
+      return [];
+    }
+  }
+
+  // ✅ FIXED: Search reservations - using queryItems
+  async searchReservations({ searchTerm, status, amenityId, userId, startDate, endDate }) {
+    try {
+      let query = 'SELECT * FROM c WHERE 1=1';
+      const parameters = [];
+      
+      if (searchTerm) {
+        query += ' AND (CONTAINS(LOWER(c.notes), @searchTerm) OR CONTAINS(LOWER(c.id), @searchTerm))';
+        parameters.push({ name: '@searchTerm', value: searchTerm.toLowerCase() });
+      }
+      
+      if (status) {
+        query += ' AND c.status = @status';
+        parameters.push({ name: '@status', value: status });
+      }
+      
+      if (amenityId) {
+        query += ' AND c.amenityId = @amenityId';
+        parameters.push({ name: '@amenityId', value: amenityId });
+      }
+      
+      if (userId) {
+        query += ' AND c.userId = @userId';
+        parameters.push({ name: '@userId', value: userId });
+      }
+      
+      if (startDate) {
+        query += ' AND c.startTime >= @startDate';
+        parameters.push({ name: '@startDate', value: startDate });
+      }
+      
+      if (endDate) {
+        query += ' AND c.endTime <= @endDate';
+        parameters.push({ name: '@endDate', value: endDate });
+      }
+      
+      query += ' ORDER BY c.createdAt DESC';
+      
+      const reservations = await databaseService.queryItems(this.collectionName, query, parameters);
+      
+      return reservations || [];
+    } catch (error) {
+      logger.error('Search reservations error:', error);
+      return [];
     }
   }
 }
