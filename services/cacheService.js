@@ -105,6 +105,74 @@ class CacheService {
   generateKey(prefix, ...parts) {
     return `${prefix}:${parts.join(':')}`;
   }
+
+    async delete(key) {
+      if (!this.isConnected) return false;
+      
+      try {
+        await this.client.del(key);
+        return true;
+      } catch (error) {
+        logger.warn('Cache delete error:', error);
+        return false;
+      }
+    }
+
+    async exists(key) {
+      if (!this.isConnected) return false;
+      
+      try {
+        const result = await this.client.exists(key);
+        return result === 1;
+      } catch (error) {
+        logger.warn('Cache exists error:', error);
+        return false;
+      }
+    }
+
+    async clear() {
+      if (!this.isConnected) return false;
+      
+      try {
+        await this.client.flushAll();
+        return true;
+      } catch (error) {
+        logger.warn('Cache clear error:', error);
+        return false;
+      }
+    }
+
+    async getTTL(key) {
+      if (!this.isConnected) return -1;
+      
+      try {
+        return await this.client.ttl(key);
+      } catch (error) {
+        logger.warn('Cache TTL error:', error);
+        return -1;
+      }
+    }
+
+    // Helper method to get cache statistics
+    async getStats() {
+      if (!this.isConnected) return null;
+      
+      try {
+        const info = await this.client.info();
+        return {
+          connected: this.isConnected,
+          used_memory: info.match(/used_memory_human:([^\r\n]+)/)?.[1] || 'unknown',
+          connected_clients: info.match(/connected_clients:(\d+)/)?.[1] || 'unknown',
+          total_connections_received: info.match(/total_connections_received:(\d+)/)?.[1] || 'unknown',
+          keyspace_hits: info.match(/keyspace_hits:(\d+)/)?.[1] || '0',
+          keyspace_misses: info.match(/keyspace_misses:(\d+)/)?.[1] || '0'
+        };
+      } catch (error) {
+        logger.warn('Cache stats error:', error);
+        return null;
+      }
+    }
 }
+
 
 module.exports = new CacheService();
