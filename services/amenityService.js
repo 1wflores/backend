@@ -37,10 +37,25 @@ class AmenityService {
     }
   }
 
+  // ✅ ENHANCED: getAllAmenities with caching
   async getAllAmenities() {
+    const cacheKey = 'amenities:all';
+    
+    // Try cache first
+    const cached = await cacheService.get(cacheKey);
+    if (cached) {
+      logger.info('📋 Returning cached amenities');
+      return cached;
+    }
+
     try {
+      // Your existing database logic unchanged
       const query = 'SELECT * FROM c WHERE c.isActive = true ORDER BY c.name';
       const amenities = await databaseService.queryItems('Amenities', query);
+      
+      // Cache the result
+      await cacheService.set(cacheKey, amenities, 3600); // 1 hour TTL
+      
       return amenities;
     } catch (error) {
       logger.error('Get all amenities error:', error);
@@ -48,10 +63,27 @@ class AmenityService {
     }
   }
 
+  // ✅ ENHANCED: getAmenityById with caching
   async getAmenityById(id) {
+    const cacheKey = cacheService.generateKey('amenity', id);
+    
+    // Try cache first
+    const cached = await cacheService.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
     try {
+      // Your existing database logic unchanged
       const amenity = await databaseService.getItem('Amenities', id);
-      return amenity && amenity.isActive ? amenity : null;
+      const result = amenity && amenity.isActive ? amenity : null;
+      
+      // Cache the result
+      if (result) {
+        await cacheService.set(cacheKey, result, 3600); // 1 hour TTL
+      }
+      
+      return result;
     } catch (error) {
       logger.error('Get amenity by ID error:', error);
       throw error;

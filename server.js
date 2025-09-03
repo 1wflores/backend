@@ -36,6 +36,7 @@ const routes = require('./routes');
 const userRoutes = require('./routes/userRoutes'); // ✅ NEW: User management routes
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 const databaseService = require('./services/databaseService');
+const cacheService = require('./services/cacheService');
 const authService = require('./services/authService'); // ✅ NEW: For default admin creation
 const logger = require('./utils/logger');
 
@@ -146,13 +147,14 @@ async function startServer() {
     try {
       console.log('📊 Connecting to database...');
       await databaseService.initialize();
-      console.log('✅ Database connected successfully');
+      await cacheService.initialize();
+      console.log('✅ Database and Cache connected successfully');
       
       // ✅ NEW: Initialize default users after database connection
       await initializeDefaultUsers();
       
     } catch (dbError) {
-      console.error('⚠️ Database connection failed:', dbError.message);
+      console.error('⚠️ Database or Cache connection failed:', dbError.message);
       console.log('⚠️ Server will run without database connection');
       // Don't exit - let the server run even if DB fails initially
     }

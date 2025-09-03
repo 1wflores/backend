@@ -94,17 +94,18 @@ async function initializeDatabase() {
           end: '23:00',
           days: [0, 1, 2, 3, 4, 5, 6]
         },
-        autoApprovalRules: {
-          maxDurationMinutes: 240,
-          maxReservationsPerDay: 1,
-          requiresAdvanceBooking: true,
-          advanceBookingHours: 24
-        },
+        // **CRITICAL CHANGE: NO autoApprovalRules for lounge**
+        // **The lounge will ALWAYS require administrator approval**
+        requiresApproval: true, // Always requires admin approval
+        maxDurationMinutes: 240, // 4 hours max
         specialRequirements: {
-          requiresDeposit: true,
-          depositAmount: 50,
-          allowsVisitors: true,
-          maxVisitors: 20
+          maxVisitors: 20,
+          advanceBookingHours: 24, // 24-hour advance booking required
+          consecutiveBookingRestrictions: {
+            weekendDaysOnly: true, // Only restrict consecutive weekend days
+            restrictedDays: [5, 6, 0], // Friday, Saturday, Sunday
+            message: 'Consecutive weekend bookings (Friday, Saturday, Sunday) are not allowed'
+          }
         }
       }
     ];
@@ -149,7 +150,13 @@ async function initializeDatabase() {
     logger.info('   🛁 Jacuzzi (7 AM - 9 PM, max 60 min, auto-approved)');
     logger.info('   🧊 Cold Tub (7 AM - 9 PM, max 60 min, auto-approved)');
     logger.info('   🧘 Yoga Deck (7 AM - 9 PM, max 60 min, auto-approved)');
-    logger.info('   🏡 Community Lounge (8 AM - 11 PM, max 4 hours, requires approval)');
+    logger.info('   🏡 Community Lounge (8 AM - 11 PM, max 12 hours, 🚨 ALWAYS REQUIRES ADMIN APPROVAL 🚨)');  
+    logger.info('');
+    logger.info('🚫 LOUNGE BOOKING RESTRICTIONS:');
+    logger.info('   ❌ NO consecutive weekend bookings (Fri+Sat, Fri+Sun, Sat+Sun)');
+    logger.info('   ✋ ALWAYS requires administrator approval');
+    logger.info('   ⏰ 24-hour advance booking required');
+    logger.info('   👀 Administrators see requests in chronological order');
     logger.info('');
     logger.info('🚀 API Endpoints ready:');
     logger.info('   🔐 POST /api/auth/login');
