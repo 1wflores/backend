@@ -1,14 +1,14 @@
-// routes/reservations.js - COMPLETE FILE
-
 const express = require('express');
-const { body, param, query } = require('express-validator');
+const { body, query, param } = require('express-validator');
 const reservationController = require('../controllers/reservationController');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 const { validate } = require('../middleware/validation');
 
 const router = express.Router();
 
-// ✅ VALIDATION RULES WITH LOUNGE SUPPORT
+// ============================================
+// VALIDATION RULES
+// ============================================
 
 // Create reservation validation
 const createReservationValidation = [
@@ -49,9 +49,11 @@ const updateReservationValidation = [
     .notEmpty()
     .withMessage('Reservation ID is required'),
   body('startTime')
+    .optional()
     .isISO8601()
     .withMessage('Valid start time is required'),
   body('endTime')
+    .optional()
     .isISO8601()
     .withMessage('Valid end time is required'),
   body('notes')
@@ -161,7 +163,9 @@ const getReservationsValidation = [
     .withMessage('Upcoming must be a boolean'),
 ];
 
-// ✅ ROUTES
+// ============================================
+// ROUTES
+// ============================================
 
 // All routes require authentication
 router.use(authenticateToken);
@@ -169,9 +173,6 @@ router.use(authenticateToken);
 // ============================================
 // PUBLIC ROUTES (Authenticated users)
 // ============================================
-
-// Health check endpoint
-router.get('/health', reservationController.getReservationHealth);
 
 // Create new reservation
 router.post(
