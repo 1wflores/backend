@@ -128,7 +128,7 @@ async function initializeDatabase() {
 
     // Create sample apartment users
     logger.info('🏠 Creating sample apartment users...');
-    const apartmentNumbers = ['101', '102', '103', '104', '105', '201', '202', '203', '204', '205'];
+    const apartmentNumbers = ['101', '102', '103', '104', '105','106', '107', '108', '109', '110' , '201', '202', '203', '204', '205', '206', '207', '208', '209', '210', '301', '302', '303', '304', '305', '306', '307', '308', '309', '310'];
     try {
       const createdUsers = await authService.createApartmentUsers(apartmentNumbers, 'Resident123!');
       logger.success(`✅ ${createdUsers.length} sample apartment users created`);
