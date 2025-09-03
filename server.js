@@ -210,5 +210,37 @@ startServer().catch(error => {
   process.exit(1);
 });
 
+// Add to your server.js or routes
+app.get('/test-cache', async (req, res) => {
+  try {
+    const cacheService = require('./services/cacheService');
+    
+    if (!cacheService.isConnected) {
+      return res.status(503).json({ error: 'Redis not connected' });
+    }
+
+    // Test with different TTL methods
+    await cacheService.setAmenityData('test-amenity', { id: 1, name: 'Test' });
+    await cacheService.setUserData('test-user', { id: 1, username: 'test' });
+    
+    const amenityData = await cacheService.get('test-amenity');
+    const userData = await cacheService.get('test-user');
+    
+    res.json({
+      success: true,
+      redis_connected: true,
+      test_data: { amenityData, userData },
+      ttl_config: {
+        default: cacheService.defaultTTL,
+        amenities: cacheService.amenitiesTTL,
+        users: cacheService.userTTL,
+        slots: cacheService.slotsTTL
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Export for testing
 module.exports = app;
