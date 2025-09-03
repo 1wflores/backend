@@ -99,6 +99,100 @@ app.get('/health', (req, res) => {
   });
 });
 
+
+// Cache health and testing endpoint
+app.get('/api/cache-test', async (req, res) => {
+  console.log('🔍 Cache test endpoint accessed');
+  
+  try {
+    // Import cache service
+    const cacheService = require('./services/cacheService');
+    
+    // Check if cache is connected
+    if (!cacheService.isConnected) {
+      return res.status(503).json({
+        success: false,
+        cache_status: 'disconnected',
+        message: 'Redis cache is not connected',
+        redis_url_configured: !!(process.env.CUSTOMCONNSTR_REDIS_URL || process.env.REDIS_URL),
+        environment_check: {
+          CUSTOMCONNSTR_REDIS_URL: !!process.env.CUSTOMCONNSTR_REDIS_URL,
+          REDIS_URL: !!process.env.REDIS_URL
+        }
+      });
+    }
+
+    // Test cache operations
+    const testKey = 'cache-test-' + Date.now();
+    const testData = {
+      timestamp: new Date().toISOString(),
+      message: 'Cache is working!',
+      test_id: Math.random().toString(36).substr(2, 9)
+    };
+
+    console.log('🧪 Testing cache SET operation...');
+    const setResult = await cacheService.set(testKey, testData, 60); // 60 second TTL
+
+    console.log('🧪 Testing cache GET operation...');
+    const getData = await cacheService.get(testKey);
+
+    // Test specialized cache methods
+    console.log('🧪 Testing specialized cache methods...');
+    await cacheService.setAmenityData('test-amenity', { id: 1, name: 'Test Pool' });
+    await cacheService.setUserData('test-user', { id: 1, username: 'testuser' });
+    await cacheService.setSlotsData('test-slots', [{ time: '09:00', available: true }]);
+    
+    const amenityData = await cacheService.get('test-amenity');
+    const userData = await cacheService.get('test-user');
+    const slotsData = await cacheService.get('test-slots');
+
+    // Clean up test data
+    console.log('🧹 Cleaning up test data...');
+    await cacheService.delete(testKey);
+    await cacheService.delete('test-amenity');
+    await cacheService.delete('test-user');
+    await cacheService.delete('test-slots');
+
+    res.json({
+      success: true,
+      cache_status: 'connected',
+      message: 'Cache is working perfectly!',
+      test_results: {
+        basic_operations: {
+          set: setResult,
+          get: !!getData,
+          data_integrity: JSON.stringify(getData) === JSON.stringify(testData)
+        },
+        specialized_methods: {
+          amenity_cache: !!amenityData,
+          user_cache: !!userData,
+          slots_cache: !!slotsData
+        }
+      },
+      ttl_configuration: {
+        default: cacheService.defaultTTL + 's',
+        amenities: cacheService.amenitiesTTL + 's',
+        users: cacheService.userTTL + 's',
+        slots: cacheService.slotsTTL + 's'
+      },
+      redis_info: {
+        connected: cacheService.isConnected,
+        client_ready: !!cacheService.client
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Cache test failed:', error);
+    res.status(500).json({
+      success: false,
+      cache_status: 'error',
+      message: 'Cache test failed',
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
 // Minimal API health check that doesn't depend on external services
 app.get('/api/health', (req, res) => {
   console.log('🔍 API health check accessed');

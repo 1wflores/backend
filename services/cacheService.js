@@ -5,7 +5,7 @@ class CacheService {
   constructor() {
     this.client = null;
     this.isConnected = false;
-    // Get TTL values from app settings (these stay in app settings)
+    // Get TTL values from app settings
     this.defaultTTL = parseInt(process.env.CACHE_DEFAULT_TTL) || 300; // 5 minutes
     this.amenitiesTTL = parseInt(process.env.CACHE_AMENITIES_TTL) || 3600; // 1 hour
     this.userTTL = parseInt(process.env.CACHE_USER_TTL) || 1800; // 30 minutes
@@ -14,39 +14,92 @@ class CacheService {
 
   async initialize() {
     try {
-      // Get Redis URL from connection strings
-      // In Azure, connection strings are available as CUSTOMCONNSTR_<name>
-      const redisUrl = process.env.CUSTOMCONNSTR_REDIS_URL || process.env.REDIS_URL;
+      // Get Redis URL from multiple possible environment variables
+      const redisUrl = process.env.CUSTOMCONNSTR_REDIS_URL || 
+                      process.env.REDIS_URL || 
+                      process.env.REDISCLOUD_URL ||
+                      process.env.REDIS_CONNECTION_STRING;
       
       if (!redisUrl) {
-        logger.warn('⚠️ No Redis URL configured');
+        logger.warn('⚠️ No Redis URL configured. Caching will be disabled.');
         this.isConnected = false;
         return;
       }
 
       logger.info('🔄 Connecting to Redis...');
+      logger.info(`🔗 Redis URL pattern: ${redisUrl.replace(/:[^:@]*@/, ':***@')}`); // Mask password in logs
 
-      this.client = redis.createClient({
-        url: redisUrl,
+      // Parse Redis URL to get connection details
+      const url = new URL(redisUrl);
+      
+      const clientOptions = {
         socket: {
-          tls: true,  // Required for rediss:// protocol
-          rejectUnauthorized: false
+          host: url.hostname,
+          port: parseInt(url.port) || 6379,
+          tls: url.protocol === 'rediss:' // Enable TLS for rediss:// protocol
         },
         retry_strategy: (options) => {
           if (options.error && options.error.code === 'ECONNREFUSED') {
+            logger.error('Redis server connection refused');
             return new Error('Redis server connection refused');
           }
           if (options.total_retry_time > 1000 * 60 * 60) {
+            logger.error('Redis retry time exhausted');
             return new Error('Redis retry time exhausted');
           }
           if (options.attempt > 10) {
+            logger.error('Max Redis retry attempts reached');
             return undefined;
           }
           return Math.min(options.attempt * 100, 3000);
         }
+      };
+
+      // Handle authentication
+      if (url.password) {
+        if (url.username && url.username !== 'default') {
+          // Username + Password authentication
+          clientOptions.username = url.username;
+          clientOptions.password = url.password;
+          logger.info('🔐 Using username+password authentication');
+        } else {
+          // Password-only authentication (most common)
+          clientOptions.password = url.password;
+          logger.info('🔐 Using password-only authentication');
+        }
+      } else {
+        logger.info('🔓 No authentication configured');
+      }
+
+      // Create Redis client
+      this.client = redis.createClient(clientOptions);
+
+      // Set up error handlers
+      this.client.on('error', (error) => {
+        logger.error('Redis client error:', error);
+        this.isConnected = false;
       });
 
+      this.client.on('connect', () => {
+        logger.info('🔄 Redis client connecting...');
+      });
+
+      this.client.on('ready', () => {
+        logger.info('✅ Redis client ready');
+        this.isConnected = true;
+      });
+
+      this.client.on('end', () => {
+        logger.warn('⚠️ Redis connection ended');
+        this.isConnected = false;
+      });
+
+      // Connect to Redis
       await this.client.connect();
+      
+      // Test the connection
+      await this.client.ping();
+      
       this.isConnected = true;
       logger.info('✅ Redis cache connected successfully');
       
@@ -58,18 +111,32 @@ class CacheService {
         - Slots: ${this.slotsTTL}s`);
         
     } catch (error) {
-      logger.error('❌ Redis connection failed:', error);
+      logger.error('❌ Redis connection failed:', error.message);
+      logger.error('Full error:', error);
       this.isConnected = false;
+      
+      // Provide specific troubleshooting hints
+      if (error.message.includes('WRONGPASS')) {
+        logger.error('💡 Redis authentication failed. Check your password in the Redis URL.');
+      } else if (error.message.includes('ECONNREFUSED')) {
+        logger.error('💡 Redis server is not reachable. Check your hostname and port.');
+      } else if (error.message.includes('ETIMEDOUT')) {
+        logger.error('💡 Redis connection timed out. Check your network connectivity.');
+      }
     }
   }
 
   // Enhanced cache methods with TTL support
   async set(key, value, customTTL = null) {
-    if (!this.isConnected) return false;
+    if (!this.isConnected) {
+      logger.warn(`Cache SET skipped (not connected): ${key}`);
+      return false;
+    }
     
     try {
       const ttl = customTTL || this.defaultTTL;
       await this.client.setEx(key, ttl, JSON.stringify(value));
+      logger.debug(`Cache SET: ${key} (TTL: ${ttl}s)`);
       return true;
     } catch (error) {
       logger.warn('Cache set error:', error);
@@ -78,14 +145,48 @@ class CacheService {
   }
 
   async get(key) {
-    if (!this.isConnected) return null;
+    if (!this.isConnected) {
+      logger.warn(`Cache GET skipped (not connected): ${key}`);
+      return null;
+    }
     
     try {
       const result = await this.client.get(key);
-      return result ? JSON.parse(result) : null;
+      if (result) {
+        logger.debug(`Cache HIT: ${key}`);
+        return JSON.parse(result);
+      } else {
+        logger.debug(`Cache MISS: ${key}`);
+        return null;
+      }
     } catch (error) {
       logger.warn('Cache get error:', error);
       return null;
+    }
+  }
+
+  async delete(key) {
+    if (!this.isConnected) return false;
+    
+    try {
+      await this.client.del(key);
+      logger.debug(`Cache DELETE: ${key}`);
+      return true;
+    } catch (error) {
+      logger.warn('Cache delete error:', error);
+      return false;
+    }
+  }
+
+  async exists(key) {
+    if (!this.isConnected) return false;
+    
+    try {
+      const result = await this.client.exists(key);
+      return result === 1;
+    } catch (error) {
+      logger.warn('Cache exists error:', error);
+      return false;
     }
   }
 
@@ -106,73 +207,19 @@ class CacheService {
     return `${prefix}:${parts.join(':')}`;
   }
 
-    async delete(key) {
-      if (!this.isConnected) return false;
-      
-      try {
-        await this.client.del(key);
-        return true;
-      } catch (error) {
-        logger.warn('Cache delete error:', error);
-        return false;
+  // Get connection info for debugging
+  getConnectionInfo() {
+    return {
+      connected: this.isConnected,
+      client_ready: !!this.client,
+      ttl_config: {
+        default: this.defaultTTL,
+        amenities: this.amenitiesTTL,
+        users: this.userTTL,
+        slots: this.slotsTTL
       }
-    }
-
-    async exists(key) {
-      if (!this.isConnected) return false;
-      
-      try {
-        const result = await this.client.exists(key);
-        return result === 1;
-      } catch (error) {
-        logger.warn('Cache exists error:', error);
-        return false;
-      }
-    }
-
-    async clear() {
-      if (!this.isConnected) return false;
-      
-      try {
-        await this.client.flushAll();
-        return true;
-      } catch (error) {
-        logger.warn('Cache clear error:', error);
-        return false;
-      }
-    }
-
-    async getTTL(key) {
-      if (!this.isConnected) return -1;
-      
-      try {
-        return await this.client.ttl(key);
-      } catch (error) {
-        logger.warn('Cache TTL error:', error);
-        return -1;
-      }
-    }
-
-    // Helper method to get cache statistics
-    async getStats() {
-      if (!this.isConnected) return null;
-      
-      try {
-        const info = await this.client.info();
-        return {
-          connected: this.isConnected,
-          used_memory: info.match(/used_memory_human:([^\r\n]+)/)?.[1] || 'unknown',
-          connected_clients: info.match(/connected_clients:(\d+)/)?.[1] || 'unknown',
-          total_connections_received: info.match(/total_connections_received:(\d+)/)?.[1] || 'unknown',
-          keyspace_hits: info.match(/keyspace_hits:(\d+)/)?.[1] || '0',
-          keyspace_misses: info.match(/keyspace_misses:(\d+)/)?.[1] || '0'
-        };
-      } catch (error) {
-        logger.warn('Cache stats error:', error);
-        return null;
-      }
-    }
+    };
+  }
 }
-
 
 module.exports = new CacheService();
