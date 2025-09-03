@@ -8,10 +8,14 @@
     "dev": "nodemon server.js",
     "test": "jest",
     "init-db": "node scripts/initDatabase.js",
-    "postinstall": "echo 'Dependencies installed successfully'"
+    "prestart": "echo 'Starting Amenity Reservation API...'",
+    "postinstall": "echo 'Dependencies installed successfully. Ready for Azure deployment.'",
+    "azure:start": "./startup.sh",
+    "health-check": "node -e \"console.log('Health check OK'); process.exit(0);\"",
+    "validate": "node -c server.js && echo 'Syntax validation passed'"
   },
   "engines": {
-    "node": ">=18.0.0",
+    "node": ">=18.0.0 <21.0.0",
     "npm": ">=9.0.0"
   },
   "dependencies": {
@@ -41,8 +45,18 @@
     "reservation",
     "amenity",
     "azure",
-    "cosmos"
+    "cosmos",
+    "nodejs"
   ],
   "author": "Walter Flores",
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1wflores/backend"
+  },
+  "azure": {
+    "node_version": "20.x",
+    "startup_file": "server.js",
+    "health_check_path": "/health"
+  }
 }
