@@ -62,6 +62,7 @@ class DatabaseService {
         partitionKey: '/id',
         indexingPolicy: {
           includedPaths: [
+            { path: '/*' },
             { path: '/userId/*' },
             { path: '/amenityId/*' },
             { path: '/startTime/*' },
