@@ -1,4 +1,4 @@
-// Enhanced cacheService.js with improved diagnostics and error handling
+// Enhanced cacheService.js with comprehensive Azure AAD Redis authentication and diagnostics
 
 const redis = require('redis');
 const { DefaultAzureCredential } = require('@azure/identity');
@@ -13,6 +13,12 @@ class CacheService {
     this.retryDelay = 5000;
     this.connectionAttempts = 0;
     this.lastError = null;
+    
+    // TTL configurations for different data types
+    this.defaultTTL = 3600; // 1 hour
+    this.amenitiesTTL = 3600; // 1 hour
+    this.userTTL = 1800; // 30 minutes
+    this.slotsTTL = 900; // 15 minutes
   }
 
   async connect() {
@@ -74,33 +80,54 @@ class CacheService {
             throw new Error('AAD token response is invalid');
           }
           
-          // Configure AAD authentication
-          redisConfig.username = 'redisuser';
+          // ✅ FIXED: Use hostname as username (correct for Azure Redis AAD)
+          redisConfig.username = redisUrl.hostname;
           redisConfig.password = tokenResponse.token;
           
           logger.info('✅ Azure AAD token obtained successfully');
           logger.info(`🕒 Token expires at: ${new Date(tokenResponse.expiresOnTimestamp).toISOString()}`);
+          logger.info(`🔑 Using hostname (${redisUrl.hostname}) as username for AAD auth`);
           
         } catch (tokenError) {
           logger.error('❌ Azure AAD token error:', {
             message: tokenError.message,
             code: tokenError.code,
-            name: tokenError.name,
-            stack: tokenError.stack
+            name: tokenError.name
           });
-          throw new Error(`Azure AAD authentication failed: ${tokenError.message}`);
+          
+          // ✅ FALLBACK: Try using the connection string instead of AAD
+          logger.warn('⚠️ AAD failed, falling back to connection string authentication');
+          
+          try {
+            const redisUrl = new URL(process.env.REDIS_URL);
+            redisConfig.socket.host = redisUrl.hostname;
+            redisConfig.socket.port = parseInt(redisUrl.port) || 6380;
+            redisConfig.socket.tls = true;
+            
+            if (redisUrl.password) {
+              redisConfig.password = redisUrl.password;
+              logger.info('🔑 Using password from Redis URL as fallback');
+            }
+            if (redisUrl.username) {
+              redisConfig.username = redisUrl.username;
+              logger.info(`👤 Using username from URL: ${redisUrl.username}`);
+            }
+          } catch (fallbackError) {
+            throw new Error(`Both AAD and connection string authentication failed: ${fallbackError.message}`);
+          }
         }
         
       } else if (process.env.REDIS_URL) {
+        // Standard connection string authentication
         logger.info('🔐 Using standard Redis URL connection');
         
         try {
           const redisUrl = new URL(process.env.REDIS_URL);
           logger.info(`🔍 Redis host: ${redisUrl.hostname}`);
-          logger.info(`🔍 Redis port: ${redisUrl.port || 6379}`);
+          logger.info(`🔍 Redis port: ${redisUrl.port || 6380}`);
           
           redisConfig.socket.host = redisUrl.hostname;
-          redisConfig.socket.port = parseInt(redisUrl.port) || 6379;
+          redisConfig.socket.port = parseInt(redisUrl.port) || 6380;
           
           if (redisUrl.password) {
             redisConfig.password = redisUrl.password;
@@ -111,7 +138,7 @@ class CacheService {
             logger.info(`👤 Using username: ${redisUrl.username}`);
           }
           
-          // Use TLS if port is 6380 (Azure default) or explicitly configured
+          // Use TLS if port is 6380 (Azure default)
           if (redisUrl.port === '6380' || process.env.REDIS_USE_TLS === 'true') {
             redisConfig.socket.tls = true;
             logger.info('🔒 TLS enabled');
@@ -174,17 +201,23 @@ class CacheService {
           fullError: JSON.stringify(error, Object.getOwnPropertyNames(error))
         });
         
-        // Specific error handling
+        // Specific error handling with solutions
         if (error.message.includes('WRONGPASS')) {
           logger.error('🔑 Authentication failed - incorrect password/token');
+          logger.info('💡 SOLUTION SUGGESTIONS:');
+          logger.info('   1. Check if your Azure Redis Cache has AAD authentication enabled');
+          logger.info('   2. Try disabling AAD by setting REDIS_USE_AAD=false');
+          logger.info('   3. Verify your REDIS_URL connection string is correct');
+          logger.info('   4. Check if you need to add your App Service to Redis access policies');
         } else if (error.message.includes('ENOTFOUND') || error.code === 'ENOTFOUND') {
           logger.error('🌐 DNS resolution failed - Redis host not found');
+          logger.info('💡 Check your REDIS_URL hostname is correct');
         } else if (error.message.includes('ECONNREFUSED') || error.code === 'ECONNREFUSED') {
           logger.error('🚫 Connection refused - Redis server not accepting connections');
+          logger.info('💡 Check firewall rules and Redis instance status');
         } else if (error.message.includes('ETIMEDOUT') || error.code === 'ETIMEDOUT') {
           logger.error('⏱️ Connection timeout - Redis server not responding');
-        } else if (error.message.includes('ECONNRESET') || error.code === 'ECONNRESET') {
-          logger.error('🔌 Connection reset - Network issue or firewall blocking');
+          logger.info('💡 Check network connectivity and Redis instance health');
         }
       });
 
@@ -258,6 +291,11 @@ class CacheService {
       // Update the client's password with the new token
       if (this.client && this.client.options) {
         this.client.options.password = tokenResponse.token;
+        // Also update username if needed (keep it as hostname for Azure Redis AAD)
+        if (process.env.REDIS_URL) {
+          const redisUrl = new URL(process.env.REDIS_URL);
+          this.client.options.username = redisUrl.hostname;
+        }
       }
       
       logger.info('✅ Azure AAD token refreshed successfully');
@@ -291,6 +329,103 @@ class CacheService {
     }
   }
 
+  // Basic cache operations
+  async get(key) {
+    if (!this.isConnected) {
+      logger.debug(`Cache GET skipped (not connected): ${key}`);
+      return null;
+    }
+
+    try {
+      const value = await this.client.get(key);
+      return value ? JSON.parse(value) : null;
+    } catch (error) {
+      logger.error(`Cache GET error for key ${key}:`, error.message);
+      return null;
+    }
+  }
+
+  async set(key, value, ttl = this.defaultTTL) {
+    if (!this.isConnected) {
+      logger.debug(`Cache SET skipped (not connected): ${key}`);
+      return false;
+    }
+
+    try {
+      const serialized = JSON.stringify(value);
+      await this.client.setEx(key, ttl, serialized);
+      return true;
+    } catch (error) {
+      logger.error(`Cache SET error for key ${key}:`, error.message);
+      return false;
+    }
+  }
+
+  async del(key) {
+    if (!this.isConnected) {
+      logger.debug(`Cache DEL skipped (not connected): ${key}`);
+      return false;
+    }
+
+    try {
+      await this.client.del(key);
+      return true;
+    } catch (error) {
+      logger.error(`Cache DEL error for key ${key}:`, error.message);
+      return false;
+    }
+  }
+
+  // Pattern deletion for cache invalidation
+  async delPattern(pattern) {
+    if (!this.isConnected) {
+      logger.debug(`Cache DEL pattern skipped (not connected): ${pattern}`);
+      return false;
+    }
+
+    try {
+      const keys = await this.client.keys(pattern);
+      if (keys.length > 0) {
+        await this.client.del(keys);
+        logger.debug(`Deleted ${keys.length} keys matching pattern: ${pattern}`);
+      }
+      return true;
+    } catch (error) {
+      logger.error(`Cache DEL pattern error for ${pattern}:`, error.message);
+      return false;
+    }
+  }
+
+  // Specialized cache methods for different data types
+  async setAmenityData(key, data, ttl = this.amenitiesTTL) {
+    return this.set(`amenity:${key}`, data, ttl);
+  }
+
+  async getAmenityData(key) {
+    return this.get(`amenity:${key}`);
+  }
+
+  async setUserData(key, data, ttl = this.userTTL) {
+    return this.set(`user:${key}`, data, ttl);
+  }
+
+  async getUserData(key) {
+    return this.get(`user:${key}`);
+  }
+
+  async setSlotsData(key, data, ttl = this.slotsTTL) {
+    return this.set(`slots:${key}`, data, ttl);
+  }
+
+  async getSlotsData(key) {
+    return this.get(`slots:${key}`);
+  }
+
+  // Key generation utility
+  generateKey(...parts) {
+    return parts.filter(p => p !== null && p !== undefined).join(':');
+  }
+
   // Enhanced health check with detailed information
   async healthCheck() {
     const status = {
@@ -305,6 +440,12 @@ class CacheService {
         host: process.env.REDIS_URL ? new URL(process.env.REDIS_URL).hostname : 'unknown',
         useAAD: process.env.REDIS_USE_AAD === 'true' || process.env.REDIS_AAD_ENABLED === 'true',
         hasRedisUrl: !!process.env.REDIS_URL
+      },
+      ttlConfig: {
+        default: this.defaultTTL,
+        amenities: this.amenitiesTTL,
+        users: this.userTTL,
+        slots: this.slotsTTL
       }
     };
 
@@ -336,55 +477,46 @@ class CacheService {
     }
   }
 
-  // Safe cache operations (keeping existing implementation)
-  async get(key) {
-    if (!this.isConnected) {
-      logger.debug(`Cache GET skipped (not connected): ${key}`);
-      return null;
-    }
-
+  // Utility method for testing
+  async testConnection() {
     try {
-      const value = await this.client.get(key);
-      return value ? JSON.parse(value) : null;
+      if (!this.isConnected) {
+        throw new Error('Not connected to Redis');
+      }
+      
+      const testKey = `test:${Date.now()}`;
+      const testValue = { test: true, timestamp: new Date().toISOString() };
+      
+      // Test set
+      const setResult = await this.set(testKey, testValue, 60);
+      if (!setResult) {
+        throw new Error('Failed to set test value');
+      }
+      
+      // Test get
+      const getValue = await this.get(testKey);
+      if (!getValue || getValue.test !== true) {
+        throw new Error('Failed to get test value');
+      }
+      
+      // Test delete
+      const delResult = await this.del(testKey);
+      if (!delResult) {
+        throw new Error('Failed to delete test value');
+      }
+      
+      return {
+        success: true,
+        message: 'All cache operations working correctly',
+        operations: ['SET', 'GET', 'DEL']
+      };
     } catch (error) {
-      logger.error(`Cache GET error for key ${key}:`, error.message);
-      return null;
+      return {
+        success: false,
+        message: error.message,
+        error: error
+      };
     }
-  }
-
-  async set(key, value, ttl = 3600) {
-    if (!this.isConnected) {
-      logger.debug(`Cache SET skipped (not connected): ${key}`);
-      return false;
-    }
-
-    try {
-      const serialized = JSON.stringify(value);
-      await this.client.setEx(key, ttl, serialized);
-      return true;
-    } catch (error) {
-      logger.error(`Cache SET error for key ${key}:`, error.message);
-      return false;
-    }
-  }
-
-  async del(key) {
-    if (!this.isConnected) {
-      logger.debug(`Cache DEL skipped (not connected): ${key}`);
-      return false;
-    }
-
-    try {
-      await this.client.del(key);
-      return true;
-    } catch (error) {
-      logger.error(`Cache DEL error for key ${key}:`, error.message);
-      return false;
-    }
-  }
-
-  generateKey(...parts) {
-    return parts.filter(p => p !== null && p !== undefined).join(':');
   }
 }
 
