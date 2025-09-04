@@ -530,6 +530,131 @@ class ReservationService {
     return { isValid: true };
   }
 
+  // Add these missing methods to your backend services/reservationService.js
+
+  // ✅ NEW: Enrich single reservation with user data
+  async enrichReservationWithUserData(reservation) {
+    try {
+      if (!reservation.userId) {
+        return reservation;
+      }
+
+      // Get user data
+      const user = await authService.getUserById(reservation.userId);
+      
+      return {
+        ...reservation,
+        user: user ? {
+          id: user.id,
+          username: user.username,
+          role: user.role
+        } : null
+      };
+    } catch (error) {
+      logger.error('Error enriching reservation with user data:', error);
+      return reservation; // Return original if enrichment fails
+    }
+  }
+
+  // ✅ NEW: Enrich single reservation with full data (user + amenity)
+  async enrichReservationWithFullData(reservation) {
+    try {
+      let enrichedReservation = { ...reservation };
+
+      // Add user data
+      if (reservation.userId) {
+        const user = await authService.getUserById(reservation.userId);
+        enrichedReservation.user = user ? {
+          id: user.id,
+          username: user.username,
+          role: user.role
+        } : null;
+      }
+
+      // Add amenity data
+      if (reservation.amenityId) {
+        const amenity = await amenityService.getAmenityById(reservation.amenityId);
+        enrichedReservation.amenity = amenity ? {
+          id: amenity.id,
+          name: amenity.name,
+          type: amenity.type,
+          capacity: amenity.capacity
+        } : null;
+      }
+
+      return enrichedReservation;
+    } catch (error) {
+      logger.error('Error enriching reservation with full data:', error);
+      return reservation; // Return original if enrichment fails
+    }
+  }
+
+  // ✅ NEW: Enrich multiple reservations with full data
+  async enrichReservationsWithFullData(reservations) {
+    try {
+      if (!Array.isArray(reservations) || reservations.length === 0) {
+        return reservations;
+      }
+
+      logger.info(`Enriching ${reservations.length} reservations with full data`);
+
+      // Enrich each reservation with both user and amenity data
+      const enrichedReservations = await Promise.all(
+        reservations.map(reservation => this.enrichReservationWithFullData(reservation))
+      );
+
+      logger.info(`✅ Successfully enriched ${enrichedReservations.length} reservations`);
+      return enrichedReservations;
+    } catch (error) {
+      logger.error('Error enriching reservations with full data:', error);
+      return reservations; // Return original array if enrichment fails
+    }
+  }
+
+  // ✅ NEW: Enrich multiple reservations with amenity data only (for the missing method)
+  async enrichReservationsWithAmenityData(reservations) {
+    try {
+      if (!Array.isArray(reservations) || reservations.length === 0) {
+        return reservations;
+      }
+
+      logger.info(`Enriching ${reservations.length} reservations with amenity data`);
+
+      // Get unique amenity IDs
+      const amenityIds = [...new Set(reservations.map(r => r.amenityId).filter(Boolean))];
+      
+      // Fetch all amenities at once for efficiency
+      const amenities = {};
+      for (const amenityId of amenityIds) {
+        try {
+          const amenity = await amenityService.getAmenityById(amenityId);
+          if (amenity) {
+            amenities[amenityId] = {
+              id: amenity.id,
+              name: amenity.name,
+              type: amenity.type,
+              capacity: amenity.capacity
+            };
+          }
+        } catch (error) {
+          logger.warn(`Failed to fetch amenity ${amenityId}:`, error.message);
+        }
+      }
+
+      // Enrich reservations with amenity data
+      const enrichedReservations = reservations.map(reservation => ({
+        ...reservation,
+        amenity: amenities[reservation.amenityId] || null
+      }));
+
+      logger.info(`✅ Successfully enriched ${enrichedReservations.length} reservations with amenity data`);
+      return enrichedReservations;
+    } catch (error) {
+      logger.error('Error enriching reservations with amenity data:', error);
+      return reservations; // Return original array if enrichment fails
+    }
+  }
+
   async validateReservationData(reservationData) {
     const errors = {};
 
