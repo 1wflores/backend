@@ -1,10 +1,12 @@
 const redis = require('redis');
+const { DefaultAzureCredential } = require('@azure/identity');
 const logger = require('../utils/logger');
 
 class CacheService {
   constructor() {
     this.client = null;
     this.isConnected = false;
+    this.credential = null;
     // Get TTL values from app settings
     this.defaultTTL = parseInt(process.env.CACHE_DEFAULT_TTL) || 300; // 5 minutes
     this.amenitiesTTL = parseInt(process.env.CACHE_AMENITIES_TTL) || 3600; // 1 hour
@@ -26,7 +28,7 @@ class CacheService {
         return;
       }
 
-      logger.info('🔄 Connecting to Redis...');
+      logger.info('🔄 Connecting to Redis with AAD...');
       logger.info(`🔗 Redis URL pattern: ${redisUrl.replace(/:[^:@]*@/, ':***@')}`); // Mask password in logs
 
       // Parse Redis URL to get connection details
@@ -36,7 +38,7 @@ class CacheService {
         socket: {
           host: url.hostname,
           port: parseInt(url.port) || 6380,
-          tls: url.protocol === 'rediss:' // Enable TLS for rediss:// protocol
+          tls: true // Always use TLS for AAD
         },
         retry_strategy: (options) => {
           if (options.error && options.error.code === 'ECONNREFUSED') {
@@ -55,15 +57,39 @@ class CacheService {
         }
       };
 
-      // Handle authentication
-      if (url.password) {
+      // Check if AAD authentication is enabled
+      const useAAD = process.env.REDIS_USE_AAD === 'true' || process.env.REDIS_AAD_ENABLED === 'true';
+      
+      if (useAAD) {
+        // Use Azure Active Directory authentication
+        logger.info('🔐 Using Azure Active Directory authentication');
+        
+        // Initialize Azure credentials
+        this.credential = new DefaultAzureCredential();
+        
+        // Get AAD token for Redis
+        const tokenResponse = await this.credential.getToken('https://redis.azure.com/.default');
+        
+        if (!tokenResponse || !tokenResponse.token) {
+          throw new Error('Failed to get AAD token for Redis');
+        }
+
+        // Use token as password with special username format
+        clientOptions.username = 'azure-ad-user';
+        clientOptions.password = tokenResponse.token;
+        
+        logger.info('✅ AAD token acquired successfully');
+        
+        // Set up token refresh (Redis tokens expire)
+        this.setupTokenRefresh(tokenResponse.expiresOnTimestamp);
+        
+      } else if (url.password) {
+        // Fall back to standard authentication
         if (url.username && url.username !== 'default') {
-          // Username + Password authentication
           clientOptions.username = url.username;
           clientOptions.password = url.password;
           logger.info('🔐 Using username+password authentication');
         } else {
-          // Password-only authentication (most common)
           clientOptions.password = url.password;
           logger.info('🔐 Using password-only authentication');
         }
@@ -78,6 +104,12 @@ class CacheService {
       this.client.on('error', (error) => {
         logger.error('Redis client error:', error);
         this.isConnected = false;
+        
+        // Handle AAD token expiration
+        if (error.message.includes('NOAUTH') && useAAD) {
+          logger.warn('AAD token may have expired, attempting refresh...');
+          this.refreshAADToken();
+        }
       });
 
       this.client.on('connect', () => {
@@ -116,8 +148,10 @@ class CacheService {
       this.isConnected = false;
       
       // Provide specific troubleshooting hints
-      if (error.message.includes('WRONGPASS')) {
-        logger.error('💡 Redis authentication failed. Check your password in the Redis URL.');
+      if (error.message.includes('WRONGPASS') || error.message.includes('NOAUTH')) {
+        logger.error('💡 Redis authentication failed.');
+        logger.error('💡 If using AAD: Check your Azure credentials and permissions.');
+        logger.error('💡 If using password: Check your connection string.');
       } else if (error.message.includes('ECONNREFUSED')) {
         logger.error('💡 Redis server is not reachable. Check your hostname and port.');
       } else if (error.message.includes('ETIMEDOUT')) {
@@ -126,7 +160,51 @@ class CacheService {
     }
   }
 
-  // Enhanced cache methods with TTL support
+  // Set up automatic AAD token refresh
+  setupTokenRefresh(expiresOnTimestamp) {
+    const refreshTime = expiresOnTimestamp - Date.now() - 300000; // Refresh 5 minutes before expiry
+    
+    if (refreshTime > 0) {
+      setTimeout(async () => {
+        await this.refreshAADToken();
+      }, refreshTime);
+      
+      logger.info(`🔄 AAD token refresh scheduled in ${Math.round(refreshTime / 1000)} seconds`);
+    }
+  }
+
+  // Refresh AAD token
+  async refreshAADToken() {
+    try {
+      if (!this.credential) {
+        logger.error('No Azure credential available for token refresh');
+        return;
+      }
+
+      logger.info('🔄 Refreshing AAD token...');
+      
+      const tokenResponse = await this.credential.getToken('https://redis.azure.com/.default');
+      
+      if (!tokenResponse || !tokenResponse.token) {
+        throw new Error('Failed to refresh AAD token');
+      }
+
+      // Update the Redis client with new token
+      if (this.client && this.client.options) {
+        this.client.options.password = tokenResponse.token;
+      }
+      
+      // Schedule next refresh
+      this.setupTokenRefresh(tokenResponse.expiresOnTimestamp);
+      
+      logger.info('✅ AAD token refreshed successfully');
+      
+    } catch (error) {
+      logger.error('❌ Failed to refresh AAD token:', error);
+    }
+  }
+
+  // Enhanced cache methods with TTL support (unchanged from original)
   async set(key, value, customTTL = null) {
     if (!this.isConnected) {
       logger.warn(`Cache SET skipped (not connected): ${key}`);
@@ -217,7 +295,8 @@ class CacheService {
         amenities: this.amenitiesTTL,
         users: this.userTTL,
         slots: this.slotsTTL
-      }
+      },
+      auth_type: this.credential ? 'AAD' : 'Password'
     };
   }
 }
