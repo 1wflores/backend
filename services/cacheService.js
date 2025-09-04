@@ -35,7 +35,7 @@ class CacheService {
       const clientOptions = {
         socket: {
           host: url.hostname,
-          port: parseInt(url.port) || 6379,
+          port: parseInt(url.port) || 6380,
           tls: url.protocol === 'rediss:' // Enable TLS for rediss:// protocol
         },
         retry_strategy: (options) => {
