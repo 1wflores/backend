@@ -8,6 +8,42 @@ class AmenityService {
     this.collectionName = 'Amenities';
   }
 
+  // ✅ NEW: Missing getAmenitiesByIds method
+  async getAmenitiesByIds(amenityIds) {
+    if (!Array.isArray(amenityIds) || amenityIds.length === 0) {
+      return [];
+    }
+
+    try {
+      logger.info(`🔍 Getting amenities by IDs: ${amenityIds.join(', ')}`);
+
+      // Check cache first
+      const cacheKey = cacheService.generateKey('amenities', 'byIds', amenityIds.sort().join(','));
+      const cached = await cacheService.get(cacheKey);
+      if (cached) {
+        logger.info(`📋 Returning cached amenities for IDs: ${amenityIds.join(', ')}`);
+        return cached;
+      }
+
+      // Build query to get amenities by IDs
+      const query = `SELECT * FROM c WHERE ARRAY_CONTAINS(@amenityIds, c.id)`;
+      const parameters = [{ name: '@amenityIds', value: amenityIds }];
+
+      const result = await databaseService.queryItems(this.collectionName, query, parameters);
+      
+      logger.info(`✅ Found ${result.length} amenities for ${amenityIds.length} requested IDs`);
+
+      // Cache the result
+      await cacheService.set(cacheKey, result, 3600); // 1 hour TTL
+
+      return result;
+
+    } catch (error) {
+      logger.error('❌ Error getting amenities by IDs:', error);
+      throw error;
+    }
+  }
+
   // ✅ ENHANCED: getAllAmenities with caching
   async getAllAmenities() {
     const cacheKey = 'amenities:all';
