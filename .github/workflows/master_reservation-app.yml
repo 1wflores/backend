@@ -55,23 +55,36 @@ jobs:
       - name: Create deployment package
         run: |
           echo "Creating deployment package..."
+          
           # Create deployment directory
           mkdir -p deployment-package
           
-          # Copy everything except what we don't need
-          cp -r . deployment-package/
+          # Copy specific files and directories (avoiding recursive copy)
+          echo "Copying application files..."
           
-          # Clean up unnecessary files in deployment package
-          cd deployment-package
-          rm -rf .git .github .gitignore README.md || echo "Cleanup completed"
-          rm -rf tests __tests__ || echo "Test directories removed"
+          # Copy directories that should exist
+          [ -d "services" ] && cp -r services deployment-package/ || echo "No services directory"
+          [ -d "routes" ] && cp -r routes deployment-package/ || echo "No routes directory"
+          [ -d "middleware" ] && cp -r middleware deployment-package/ || echo "No middleware directory"
+          [ -d "controllers" ] && cp -r controllers deployment-package/ || echo "No controllers directory"
+          [ -d "config" ] && cp -r config deployment-package/ || echo "No config directory"
+          [ -d "utils" ] && cp -r utils deployment-package/ || echo "No utils directory"
+          [ -d "scripts" ] && cp -r scripts deployment-package/ || echo "No scripts directory"
+          
+          # Copy node_modules (the built dependencies)
+          cp -r node_modules deployment-package/
+          
+          # Copy essential root files
+          cp server.js deployment-package/
+          cp package.json deployment-package/
+          [ -f "package-lock.json" ] && cp package-lock.json deployment-package/ || echo "No package-lock.json to copy"
           
           # Verify deployment package
           echo "Deployment package contents:"
-          ls -la
+          ls -la deployment-package/
           
-          echo "Package.json contents:"
-          cat package.json | head -20
+          echo "Checking package.json in deployment:"
+          head -10 deployment-package/package.json
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
