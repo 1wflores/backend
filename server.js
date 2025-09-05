@@ -16,13 +16,23 @@ const SERVER_CONFIG = {
   startTime: new Date().toISOString()
 };
 
-console.log('🚀 Starting Amenity Reservation API...');
-console.log('📦 Node.js version:', process.version);
-console.log('🌍 Environment:', SERVER_CONFIG.nodeEnv);
-console.log('🔌 Port:', SERVER_CONFIG.port);
-console.log('⏰ Started at:', SERVER_CONFIG.startTime);
+// Environment-based logging control
+const isProduction = SERVER_CONFIG.nodeEnv === 'production';
+const isDevelopment = SERVER_CONFIG.nodeEnv === 'development';
+const logLevel = process.env.LOG_LEVEL || (isProduction ? 'warn' : 'info');
 
-// Enhanced environment validation
+// Startup logging (reduced in production)
+if (isDevelopment) {
+  console.log('🚀 Starting Amenity Reservation API...');
+  console.log('📦 Node.js version:', process.version);
+  console.log('🌍 Environment:', SERVER_CONFIG.nodeEnv);
+  console.log('🔌 Port:', SERVER_CONFIG.port);
+  console.log('⏰ Started at:', SERVER_CONFIG.startTime);
+} else {
+  console.log(`Starting Amenity API v${SERVER_CONFIG.version} on port ${SERVER_CONFIG.port}`);
+}
+
+// Enhanced environment validation (reduced production logging)
 const validateEnvironment = () => {
   const criticalVars = {
     COSMOS_ENDPOINT: process.env.COSMOS_ENDPOINT,
@@ -35,25 +45,35 @@ const validateEnvironment = () => {
     JWT_SECRET: process.env.JWT_SECRET
   };
 
-  console.log('🔧 Environment validation:');
+  if (isDevelopment) {
+    console.log('🔧 Environment validation:');
+  }
   
   const missing = [];
   Object.entries(criticalVars).forEach(([key, value]) => {
-    const status = value ? '✅ Present' : '❌ Missing';
-    console.log(`- ${key}: ${status}`);
     if (!value) missing.push(key);
+    if (isDevelopment) {
+      const status = value ? '✅ Present' : '❌ Missing';
+      console.log(`- ${key}: ${status}`);
+    }
   });
 
-  Object.entries(optionalVars).forEach(([key, value]) => {
-    const status = value ? '✅ Present' : '⚠️ Optional';
-    console.log(`- ${key}: ${status}`);
-  });
+  if (isDevelopment) {
+    Object.entries(optionalVars).forEach(([key, value]) => {
+      const status = value ? '✅ Present' : '⚠️ Optional';
+      console.log(`- ${key}: ${status}`);
+    });
+  }
 
   if (missing.length > 0) {
     console.error('❌ Critical environment variables missing:', missing.join(', '));
-    console.error('The server will start but some operations will fail.');
+    if (!isProduction) {
+      console.error('The server will start but some operations will fail.');
+    }
   } else {
-    console.log('✅ All critical environment variables present');
+    if (isDevelopment) {
+      console.log('✅ All critical environment variables present');
+    }
   }
 
   return { missing, isValid: missing.length === 0 };
@@ -67,15 +87,26 @@ const envValidation = validateEnvironment();
 
 const app = express();
 
-// Enhanced request logging middleware
+// Enhanced request logging middleware (environment-aware)
 app.use((req, res, next) => {
-  const timestamp = new Date().toISOString();
-  const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
-  const userAgent = req.get('User-Agent') || 'unknown';
-  
-  // Only log non-health check requests to reduce noise
-  if (!req.url.includes('health') && !req.url.includes('robots')) {
-    console.log(`[${timestamp}] ${req.method} ${req.url} - IP: ${clientIP} - UA: ${userAgent}`);
+  // In production, only log important requests
+  if (isProduction) {
+    const importantPaths = ['/api/auth/', '/api/admin/', '/api/users'];
+    const isImportant = importantPaths.some(path => req.url.startsWith(path));
+    const isError = res.statusCode >= 400;
+    
+    if (isImportant || isError) {
+      const timestamp = new Date().toISOString();
+      console.log(`[${timestamp}] ${req.method} ${req.url} - ${req.ip || 'unknown'}`);
+    }
+  } else {
+    // Development: log all non-health check requests
+    if (!req.url.includes('health') && !req.url.includes('robots')) {
+      const timestamp = new Date().toISOString();
+      const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
+      const userAgent = req.get('User-Agent') || 'unknown';
+      console.log(`[${timestamp}] ${req.method} ${req.url} - IP: ${clientIP} - UA: ${userAgent}`);
+    }
   }
   
   next();
@@ -110,9 +141,17 @@ app.use(express.urlencoded({
 // Compression
 app.use(compression());
 
-// Enhanced logging
+// Enhanced logging (environment-aware)
 if (SERVER_CONFIG.nodeEnv !== 'test') {
-  app.use(morgan(SERVER_CONFIG.nodeEnv === 'production' ? 'combined' : 'dev'));
+  if (isProduction) {
+    // Production: only log errors and slow requests
+    app.use(morgan('combined', {
+      skip: (req, res) => res.statusCode < 400
+    }));
+  } else {
+    // Development: normal logging
+    app.use(morgan('dev'));
+  }
 }
 
 // ==========================================
@@ -145,7 +184,7 @@ app.get('/health', (req, res) => {
 });
 
 // ==========================================
-// SERVICE MANAGEMENT CLASS
+// SERVICE MANAGEMENT CLASS (PRESERVED)
 // ==========================================
 
 class ServiceManager {
@@ -165,7 +204,9 @@ class ServiceManager {
         initialized: false,
         error: null
       });
-      console.log(`✅ Service registered: ${name}`);
+      if (isDevelopment) {
+        console.log(`✅ Service registered: ${name}`);
+      }
       return service;
     } catch (error) {
       console.error(`❌ Failed to register service ${name}:`, error.message);
@@ -185,7 +226,7 @@ class ServiceManager {
     return service ? service.instance : null;
   }
 
-  // Initialize all services
+  // Initialize all services (PRESERVED)
   async initializeServices() {
     if (this.initializationPromise) {
       return this.initializationPromise;
@@ -196,13 +237,17 @@ class ServiceManager {
   }
 
   async _doInitialization() {
-    console.log('🔄 Initializing services...');
+    if (isDevelopment) {
+      console.log('🔄 Initializing services...');
+    }
     
     const initPromises = [];
     
     for (const [name, serviceConfig] of this.services.entries()) {
       if (!serviceConfig.instance) {
-        console.warn(`⚠️ Skipping ${name} - not available`);
+        if (isDevelopment) {
+          console.warn(`⚠️ Skipping ${name} - not available`);
+        }
         continue;
       }
 
@@ -212,18 +257,27 @@ class ServiceManager {
 
     const results = await Promise.allSettled(initPromises);
     
-    // Log results
+    // Log results (reduced in production)
+    let successCount = 0;
     results.forEach((result, index) => {
       const serviceName = Array.from(this.services.keys())[index];
       if (result.status === 'fulfilled') {
-        console.log(`✅ ${serviceName} initialized successfully`);
+        successCount++;
+        if (isDevelopment) {
+          console.log(`✅ ${serviceName} initialized successfully`);
+        }
       } else {
         console.error(`❌ ${serviceName} initialization failed:`, result.reason?.message);
       }
     });
 
     this.initialized = true;
-    console.log('✅ Service initialization completed');
+    
+    if (isProduction) {
+      console.log(`Services initialized: ${successCount}/${this.services.size}`);
+    } else {
+      console.log('✅ Service initialization completed');
+    }
     
     return this.getServiceStatus();
   }
@@ -245,7 +299,7 @@ class ServiceManager {
     }
   }
 
-  // Get status of all services
+  // Get status of all services (PRESERVED)
   getServiceStatus() {
     const status = {};
     for (const [name, config] of this.services.entries()) {
@@ -258,7 +312,7 @@ class ServiceManager {
     return status;
   }
 
-  // Graceful shutdown of all services
+  // Graceful shutdown of all services (PRESERVED)
   async shutdown() {
     console.log('🔄 Shutting down services...');
     
@@ -266,7 +320,9 @@ class ServiceManager {
       try {
         if (config.instance && typeof config.instance.disconnect === 'function') {
           await config.instance.disconnect();
-          console.log(`✅ ${name} disconnected`);
+          if (isDevelopment) {
+            console.log(`✅ ${name} disconnected`);
+          }
         }
       } catch (error) {
         console.error(`❌ Error disconnecting ${name}:`, error.message);
@@ -276,14 +332,14 @@ class ServiceManager {
 }
 
 // ==========================================
-// SERVICE REGISTRATION & ROUTE SETUP
+// SERVICE REGISTRATION & ROUTE SETUP (PRESERVED)
 // ==========================================
 
 const serviceManager = new ServiceManager();
 
 // Register all services
 const databaseService = serviceManager.registerService('database', './services/databaseService', 'initialize');
-const cacheService = serviceManager.registerService('cache', './services/cacheService', 'connect'); // ✅ FIXED!
+const cacheService = serviceManager.registerService('cache', './services/cacheService', 'connect');
 const authService = serviceManager.registerService('auth', './services/authService', 'initialize');
 
 // Register routes and middleware
@@ -297,13 +353,17 @@ try {
   notFoundHandler = errorHandlers.notFoundHandler;
   logger = require('./utils/logger');
   
-  console.log('✅ All modules loaded successfully');
+  if (isDevelopment) {
+    console.log('✅ All modules loaded successfully');
+  }
 } catch (moduleError) {
   console.error('❌ Failed to load modules:', moduleError.message);
-  console.error('Stack:', moduleError.stack);
+  if (isDevelopment) {
+    console.error('Stack:', moduleError.stack);
+  }
 }
 
-// Enhanced service health endpoint
+// Enhanced service health endpoint (PRESERVED)
 app.get('/api/health', async (req, res) => {
   const serviceStatus = serviceManager.getServiceStatus();
   const overallStatus = Object.values(serviceStatus).every(s => s.available && s.initialized);
@@ -322,7 +382,7 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
-// Cache test endpoint (enhanced)
+// Cache test endpoint (PRESERVED)
 app.get('/api/cache-test', async (req, res) => {
   try {
     const cache = serviceManager.getService('cache');
@@ -377,43 +437,55 @@ app.get('/api/cache-test', async (req, res) => {
 // Register API routes
 if (routes) {
   app.use('/api', routes);
-  console.log('✅ Main API routes registered');
+  if (isDevelopment) {
+    console.log('✅ Main API routes registered');
+  }
 }
 
 if (userRoutes) {
   app.use('/api/auth', userRoutes);
-  console.log('✅ Auth routes registered');
+  if (isDevelopment) {
+    console.log('✅ Auth routes registered');
+  }
 }
 
 // Error handlers
 if (notFoundHandler && errorHandler) {
   app.use(notFoundHandler);
   app.use(errorHandler);
-  console.log('✅ Error handlers registered');
+  if (isDevelopment) {
+    console.log('✅ Error handlers registered');
+  }
 }
 
 // ==========================================
-// DEFAULT USER INITIALIZATION
+// DEFAULT USER INITIALIZATION (PRESERVED)
 // ==========================================
 
 const initializeDefaultUsers = async () => {
   try {
     const auth = serviceManager.getService('auth');
     if (!auth || typeof auth.createDefaultAdmin !== 'function') {
-      console.warn('⚠️ Auth service not available - skipping default user creation');
+      if (isDevelopment) {
+        console.warn('⚠️ Auth service not available - skipping default user creation');
+      }
       return;
     }
     
-    console.log('👤 Initializing default users...');
+    if (isDevelopment) {
+      console.log('👤 Initializing default users...');
+    }
     await auth.createDefaultAdmin();
-    console.log('✅ Default users initialized');
+    if (isDevelopment) {
+      console.log('✅ Default users initialized');
+    }
   } catch (error) {
     console.error('⚠️ Default users initialization failed:', error.message);
   }
 };
 
 // ==========================================
-// SERVER STARTUP & SHUTDOWN
+// SERVER STARTUP & SHUTDOWN (PRESERVED)
 // ==========================================
 
 class Server {
@@ -424,16 +496,22 @@ class Server {
 
   async start() {
     try {
-      console.log('🔄 Starting server...');
+      if (isDevelopment) {
+        console.log('🔄 Starting server...');
+      }
       
       // Start HTTP server first (for Azure health checks)
       this.httpServer = app.listen(SERVER_CONFIG.port, '0.0.0.0', () => {
-        console.log('=================================');
-        console.log('🎉 HTTP Server successfully started!');
-        console.log(`✅ Listening on port ${SERVER_CONFIG.port}`);
-        console.log(`🌍 Environment: ${SERVER_CONFIG.nodeEnv}`);
-        console.log('📡 Server is ready for requests');
-        console.log('=================================');
+        if (isProduction) {
+          console.log(`Server running on port ${SERVER_CONFIG.port} (${SERVER_CONFIG.nodeEnv})`);
+        } else {
+          console.log('=================================');
+          console.log('🎉 HTTP Server successfully started!');
+          console.log(`✅ Listening on port ${SERVER_CONFIG.port}`);
+          console.log(`🌍 Environment: ${SERVER_CONFIG.nodeEnv}`);
+          console.log('📡 Server is ready for requests');
+          console.log('=================================');
+        }
       });
 
       // Handle server errors
@@ -471,10 +549,14 @@ class Server {
         await initializeDefaultUsers();
       }
       
-      console.log('🎯 Server fully initialized and ready');
+      if (isDevelopment) {
+        console.log('🎯 Server fully initialized and ready');
+      }
     } catch (error) {
       console.error('⚠️ Service initialization failed:', error.message);
-      console.log('⚠️ Server continues to run with limited functionality');
+      if (isDevelopment) {
+        console.log('⚠️ Server continues to run with limited functionality');
+      }
     }
   }
 
@@ -521,13 +603,15 @@ class Server {
 }
 
 // ==========================================
-// ERROR HANDLING & STARTUP
+// ERROR HANDLING & STARTUP (PRESERVED)
 // ==========================================
 
 // Global error handlers
 process.on('uncaughtException', (error) => {
   console.error('💥 Uncaught Exception:', error);
-  console.error('Stack:', error.stack);
+  if (isDevelopment) {
+    console.error('Stack:', error.stack);
+  }
   
   if (SERVER_CONFIG.nodeEnv === 'production') {
     // In production, try to gracefully shutdown
