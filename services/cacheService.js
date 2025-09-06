@@ -108,7 +108,7 @@ class CacheService {
           }
           
           // Use hostname as username (correct for Azure Redis AAD)
-          redisConfig.username = redisUrl.hostname;
+          redisConfig.username = process.env.AZURE_CLIENT_ID || 'a0f561f1-7653-4055-85a7-19516b6780e2';
           redisConfig.password = tokenResponse.token;
           
           if (this.connectionAttempts === 1) {
